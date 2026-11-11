@@ -6,10 +6,19 @@ import type { AntigravityCatalog } from "./grouping.js";
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Antigravity";
 
+export function normalizeModelAlias(modelId: string): string {
+  const lower = modelId.trim().toLowerCase();
+  if (lower === "gemini4carbon") return "gemini-4-carbon";
+  if (lower === "gemini4argon") return "gemini-4-argon";
+  return modelId;
+}
+
 /**
  * Public selectable model IDs → backend request model IDs by thinking effort.
  *
  * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
+ * - Gemini 4 Carbon (Low / Medium / High)
+ * - Gemini 4 Argon (Low / Medium / High)
  * - Gemini 3.8 Flash (Low / Medium / High)
  * - Gemini 3.7 Flash (Low / Medium / High)
  * - Gemini 3.6 Flash (Low / Medium / High)
@@ -23,6 +32,17 @@ export const PROVIDER_NAME = "Antigravity";
  * advertised by the backend for each model.
  */
 export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
+  "gemini-4-carbon": {
+    off: "gemini-4-carbon-low",
+    routing: {
+      minimal: "gemini-4-carbon-low",
+      low: "gemini-4-carbon-low",
+      medium: "gemini-4-carbon-medium",
+      high: "gemini-4-carbon-high",
+      xhigh: "gemini-4-carbon-high",
+    },
+    defaultRequestId: "gemini-4-carbon-high",
+  },
   "gemini-4-argon": {
     off: "gemini-4-argon-low",
     routing: {
@@ -130,6 +150,10 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
  * Requesting more than these limits returns a 400 Bad Request from the API.
  */
 export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  "gemini-4-carbon": 65536,
+  "gemini-4-carbon-low": 65536,
+  "gemini-4-carbon-medium": 65536,
+  "gemini-4-carbon-high": 65536,
   "gemini-4-argon": 65536,
   "gemini-4-argon-low": 65536,
   "gemini-4-argon-medium": 65536,
@@ -164,14 +188,15 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
 };
 
 export function getMaxOutputTokens(modelId: string, runtimeModel?: string): number {
+  const normalizedId = normalizeModelAlias(modelId);
   // Refreshed (and restored) catalog limits take precedence over static defaults.
-  const discovered = currentModels.find((model) => model.id === modelId);
+  const discovered = currentModels.find((model) => model.id === normalizedId);
   if (currentModels !== ANTIGRAVITY_MODELS && discovered) return discovered.maxTokens;
   if (runtimeModel && RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel] !== undefined) {
     return RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel];
   }
-  if (RUNTIME_MAX_OUTPUT_TOKENS[modelId] !== undefined) {
-    return RUNTIME_MAX_OUTPUT_TOKENS[modelId];
+  if (RUNTIME_MAX_OUTPUT_TOKENS[normalizedId] !== undefined) {
+    return RUNTIME_MAX_OUTPUT_TOKENS[normalizedId];
   }
   if (runtimeModel) {
     if (runtimeModel.startsWith("claude-")) return 64000;
@@ -232,6 +257,16 @@ const thinkingLevelMaps = {
 
 /** Same set as `agy models`, collapsed to public Pi model IDs. */
 export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
+  {
+    id: "gemini-4-carbon",
+    name: "Gemini 4 Carbon (Antigravity)",
+    reasoning: true,
+    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
+    input: ["text", "image"],
+    cost: geminiProCost,
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
   {
     id: "gemini-4-argon",
     name: "Gemini 4 Argon (Antigravity)",
@@ -351,11 +386,12 @@ export function resetAntigravityCatalogForTests(): void {
 
 /** Resolve public model id + thinking effort to Antigravity runtime model id. */
 export function getAntigravityRequestModelId(modelId: string, effort: string | undefined): string {
-  const r = currentRouting[modelId] ?? ANTIGRAVITY_ROUTING[modelId];
-  if (!r) return modelId;
+  const normalizedId = normalizeModelAlias(modelId);
+  const r = currentRouting[normalizedId] ?? ANTIGRAVITY_ROUTING[normalizedId];
+  if (!r) return normalizedId;
 
   if (effort === undefined || effort === "off") {
-    return r.off ?? r.routing?.minimal ?? r.routing?.low ?? r.defaultRequestId ?? modelId;
+    return r.off ?? r.routing?.minimal ?? r.routing?.low ?? r.defaultRequestId ?? normalizedId;
   }
 
   const effortKey = effort as ThinkingEffort;
@@ -367,7 +403,7 @@ export function getAntigravityRequestModelId(modelId: string, effort: string | u
       r.routing?.minimal ??
       r.off ??
       r.defaultRequestId ??
-      modelId
+      normalizedId
     );
   }
 
@@ -377,7 +413,7 @@ export function getAntigravityRequestModelId(modelId: string, effort: string | u
     r.routing?.minimal ??
     r.off ??
     r.defaultRequestId ??
-    modelId
+    normalizedId
   );
 }
 
@@ -407,6 +443,11 @@ export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): 
 export type { ThinkingWire };
 
 export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
+  // Gemini 4 Carbon
+  "gemini-4-carbon": "MODEL_PLACEHOLDER_M667",
+  "gemini-4-carbon-high": "MODEL_PLACEHOLDER_M667",
+  "gemini-4-carbon-medium": "MODEL_PLACEHOLDER_M668",
+  "gemini-4-carbon-low": "MODEL_PLACEHOLDER_M669",
   // Gemini 4 Argon
   "gemini-4-argon": "MODEL_PLACEHOLDER_M417",
   "gemini-4-argon-high": "MODEL_PLACEHOLDER_M417",
@@ -472,12 +513,13 @@ export function registerDiscoveredModelEnums(
 
 /** Get model_enum label for a given wire model id (dynamic cache first, then static fallback). */
 export function getModelEnum(wireModelId: string): string | undefined {
-  const direct = modelEnumCache.get(wireModelId) || ANTIGRAVITY_MODEL_ENUM[wireModelId];
+  const normalized = normalizeModelAlias(wireModelId);
+  const direct = modelEnumCache.get(normalized) || ANTIGRAVITY_MODEL_ENUM[normalized];
   if (direct) return direct;
 
   // Runtime overrides may name a public/base model while discovery only returned
   // an enum for its selected runtime variant (for example `-low`).
-  const routed = getAntigravityRequestModelId(wireModelId, undefined);
+  const routed = getAntigravityRequestModelId(normalized, undefined);
   return modelEnumCache.get(routed) || ANTIGRAVITY_MODEL_ENUM[routed];
 }
 
@@ -502,35 +544,40 @@ export function getThinkingConfig(
   modelId: string,
   effort: string | undefined,
 ): ThinkingWire | undefined {
-  if (modelId.startsWith("claude-")) {
+  const normalized = normalizeModelAlias(modelId);
+  if (normalized.startsWith("claude-")) {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     return { includeThoughts: true, thinkingBudget: 1024 };
   }
-  if (modelId.startsWith("gpt-oss-")) {
+  if (normalized.startsWith("gpt-oss-")) {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     return { includeThoughts: true, thinkingBudget: 8192 };
   }
-  if (modelId.startsWith("gemini-3.5-flash") || modelId === "gemini-3-flash-agent") {
+  if (normalized.startsWith("gemini-3.5-flash") || normalized === "gemini-3-flash-agent") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     const thinkingBudget =
       effort === "high" || effort === "xhigh" ? 10_000 : effort === "medium" ? 4_000 : 1_000;
     return { includeThoughts: true, thinkingBudget };
   }
-  if (modelId.startsWith("gemini-3.1-pro") || modelId === "gemini-pro-agent") {
+  if (normalized.startsWith("gemini-3.1-pro") || normalized === "gemini-pro-agent") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     return {
       includeThoughts: true,
       thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
     };
   }
-  // Gemini 4 Argon rejects thinkingBudget 0 and any budget under 1000 (#93).
-  if (modelId.includes("argon") || modelId.startsWith("gemini-4")) {
+  // Gemini 4 Argon/Carbon rejects thinkingBudget 0 and any budget under 1000 (#93).
+  if (
+    normalized.includes("argon") ||
+    normalized.includes("carbon") ||
+    normalized.startsWith("gemini-4")
+  ) {
     if (!effort || effort === "off") return undefined;
     const thinkingBudget =
       effort === "high" || effort === "xhigh" ? -1 : effort === "medium" ? 4_000 : 1_000;
     return { includeThoughts: true, thinkingBudget };
   }
-  if (modelId.startsWith("gemini-")) {
+  if (normalized.startsWith("gemini-")) {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     const thinkingBudget =
       effort === "high" || effort === "xhigh" ? -1 : effort === "medium" ? 4_000 : 1_000;

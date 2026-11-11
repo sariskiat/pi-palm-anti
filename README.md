@@ -1,6 +1,6 @@
 # pi-palm-anti
 
-Google Cloud Gemini Enterprise (`businessaicode.googleapis.com`) and Antigravity (`cloudcode-pa.googleapis.com`) provider for [Pi Coding Agent](https://pi.dev), with `gemini-4-argon` (`low`, `medium`, `high`) support.
+Google Cloud Gemini Enterprise (`businessaicode.googleapis.com` / Vertex AI `aiplatform.googleapis.com`) and Antigravity (`cloudcode-pa.googleapis.com`) provider for [Pi Coding Agent](https://pi.dev), with `gemini-4-carbon` and `gemini-4-argon` (`low`, `medium`, `high`) support.
 
 ## Install
 
@@ -17,9 +17,7 @@ pi install git:github.com/sariskiat/pi-palm-anti
   "defaultModel": "gemini-4-argon",
   "defaultThinkingLevel": "high",
   "httpIdleTimeoutMs": 600000,
-  "packages": [
-    "git:github.com/sariskiat/pi-palm-anti"
-  ]
+  "packages": ["git:github.com/sariskiat/pi-palm-anti"]
 }
 ```
 
@@ -44,6 +42,7 @@ Then run `/reload` in Pi.
    ```
 3. Select a model:
    ```text
+   /model antigravity/gemini-4-carbon
    /model antigravity/gemini-4-argon
    ```
 
@@ -52,6 +51,7 @@ Then run `/reload` in Pi.
 <!-- prettier-ignore -->
 | Model | Thinking levels | Enterprise backend | Subscription backend |
 | --- | --- | --- | --- |
+| `antigravity/gemini-4-carbon` | `low`, `medium`, `high` | `aiplatform.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/gemini-4-argon` | `low`, `medium`, `high` | `businessaicode.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/gemini-3.8-flash` | `low`, `medium`, `high` | `businessaicode.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/gemini-3.1-pro` | `low`, `high` | `businessaicode.googleapis.com` | `cloudcode-pa.googleapis.com` |

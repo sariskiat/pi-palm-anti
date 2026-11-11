@@ -8,10 +8,14 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   antigravityHeaders,
+  BUSINESS_AICODE_ENDPOINT,
   defaultProjectId,
   defaultUserAgent,
   isEnterpriseCredentials,
   stableProjectId,
+  VERTEX_AI_ENDPOINT,
+  vertexAiBaseUrl,
+  vertexAiStreamUrl,
 } from "../src/client/index.js";
 import { getLastDiagnostics, resetDiagnosticsForTests, setLastError } from "../src/diagnostics/index.js";
 import { GeminiToolCallingMode, StopReason, ToolChoice } from "../src/types/enums.js";
@@ -20,14 +24,23 @@ import {
   getMaxOutputTokens,
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
+  getModelEnum,
+  getThinkingConfig,
 } from "../src/models/index.js";
 import {
   buildRequest,
+  buildVertexAiRequest,
+  clearEnterpriseRoutingCache,
   convertMessages,
   convertTools,
   friendlyAntigravityError,
   mapStopReason,
+  prefersVertexAiEnterprise,
   publicErrorStatus,
+  resolveVertexThinkingLevel,
+  streamAntigravity,
+  toBusinessAiCodeModelId,
+  toVertexAiModelId,
 } from "../src/stream/index.js";
 import {
   antigravityRequestEnvelope,
@@ -62,6 +75,24 @@ const assert = {
 const route = (model: string, effort?: string) => getAntigravityRequestModelId(model, effort);
 
 const routeCases: Array<[string, string | undefined, string]> = [
+  ["gemini-4-carbon", undefined, "gemini-4-carbon-low"],
+  ["gemini-4-carbon", "off", "gemini-4-carbon-low"],
+  ["gemini-4-carbon", "minimal", "gemini-4-carbon-low"],
+  ["gemini-4-carbon", "low", "gemini-4-carbon-low"],
+  ["gemini-4-carbon", "medium", "gemini-4-carbon-medium"],
+  ["gemini-4-carbon", "high", "gemini-4-carbon-high"],
+  ["gemini-4-carbon", "xhigh", "gemini-4-carbon-high"],
+  ["gemini4carbon", undefined, "gemini-4-carbon-low"],
+  ["gemini4carbon", "low", "gemini-4-carbon-low"],
+  ["gemini4carbon", "medium", "gemini-4-carbon-medium"],
+  ["gemini4carbon", "high", "gemini-4-carbon-high"],
+  ["gemini-4-argon", undefined, "gemini-4-argon-low"],
+  ["gemini-4-argon", "off", "gemini-4-argon-low"],
+  ["gemini-4-argon", "minimal", "gemini-4-argon-low"],
+  ["gemini-4-argon", "low", "gemini-4-argon-low"],
+  ["gemini-4-argon", "medium", "gemini-4-argon-medium"],
+  ["gemini-4-argon", "high", "gemini-4-argon-high"],
+  ["gemini-4-argon", "xhigh", "gemini-4-argon-high"],
   ["gemini-3.8-flash", undefined, "gemini-3.8-flash-low"],
   ["gemini-3.8-flash", "off", "gemini-3.8-flash-low"],
   ["gemini-3.8-flash", "minimal", "gemini-3.8-flash-low"],
@@ -105,6 +136,7 @@ for (const [model, effort, expected] of routeCases) {
 
 const modelIds = new Set(ANTIGRAVITY_MODELS.map((model) => model.id));
 const expectedModels = [
+  "gemini-4-carbon",
   "gemini-4-argon",
   "gemini-3.8-flash",
   "gemini-3.7-flash",
@@ -125,6 +157,7 @@ for (const expected of expectedModels) {
 }
 
 const expectedThinkingLevels: Record<string, string[]> = {
+  "gemini-4-carbon": ["low", "medium", "high"],
   "gemini-4-argon": ["low", "medium", "high"],
   "gemini-3.8-flash": ["low", "medium", "high"],
   "gemini-3.7-flash": ["low", "medium", "high"],
@@ -146,6 +179,35 @@ for (const configuredModel of ANTIGRAVITY_MODELS) {
     `${configuredModel.id} must only expose backend-supported thinking levels`,
   );
 }
+
+// Gemini 4 Carbon static/alias checks (routing, thinking, enums, max tokens, BusinessAICode)
+assert.equal(getMaxOutputTokens("gemini-4-carbon", "gemini-4-carbon-high"), 65536);
+assert.equal(getMaxOutputTokens("gemini4carbon", "gemini-4-carbon-high"), 65536);
+assert.equal(getThinkingConfig("gemini-4-carbon-high", "off"), undefined);
+assert.deepEqual(getThinkingConfig("gemini-4-carbon-low", "low"), {
+  includeThoughts: true,
+  thinkingBudget: 1000,
+});
+assert.deepEqual(getThinkingConfig("gemini-4-carbon-medium", "medium"), {
+  includeThoughts: true,
+  thinkingBudget: 4000,
+});
+assert.deepEqual(getThinkingConfig("gemini-4-carbon-high", "high"), {
+  includeThoughts: true,
+  thinkingBudget: -1,
+});
+assert.deepEqual(getThinkingConfig("gemini4carbon", "high"), {
+  includeThoughts: true,
+  thinkingBudget: -1,
+});
+assert.equal(getModelEnum("gemini-4-carbon-high"), "MODEL_PLACEHOLDER_M667");
+assert.equal(getModelEnum("gemini-4-carbon-medium"), "MODEL_PLACEHOLDER_M668");
+assert.equal(getModelEnum("gemini-4-carbon-low"), "MODEL_PLACEHOLDER_M669");
+assert.equal(getModelEnum("gemini4carbon"), "MODEL_PLACEHOLDER_M667");
+assert.equal(toBusinessAiCodeModelId("gemini-4-carbon", "low"), "gemini-4-carbon-low");
+assert.equal(toBusinessAiCodeModelId("gemini-4-carbon", "medium"), "gemini-4-carbon-medium");
+assert.equal(toBusinessAiCodeModelId("gemini-4-carbon", "high"), "gemini-4-carbon-high");
+assert.equal(toBusinessAiCodeModelId("gemini4carbon", "high"), "gemini-4-carbon-high");
 
 const booleanUnionTool = {
   name: "boolean_union",
@@ -2002,6 +2064,188 @@ const stringNoneReq = buildRequest(
 assert.deepEqual(stringNoneReq.request.toolConfig, {
   functionCallingConfig: { mode: GeminiToolCallingMode.None },
 });
+
+// 9. Vertex AI Enterprise routing, thinkingLevel wire conversion, and BusinessAICode fallback
+assert.equal(vertexAiBaseUrl(), VERTEX_AI_ENDPOINT);
+assert.equal(vertexAiBaseUrl("global"), "https://aiplatform.googleapis.com");
+assert.equal(vertexAiBaseUrl("us-central1"), "https://us-central1-aiplatform.googleapis.com");
+assert.equal(
+  vertexAiStreamUrl("gemini-enterprise-501902", "gemini-4-carbon", "global"),
+  "https://aiplatform.googleapis.com/v1/projects/gemini-enterprise-501902/locations/global/publishers/google/models/gemini-4-carbon:streamGenerateContent?alt=sse",
+);
+
+assert.equal(toVertexAiModelId("gemini-4-carbon-high"), "gemini-4-carbon");
+assert.equal(toVertexAiModelId("gemini-4-carbon-medium"), "gemini-4-carbon");
+assert.equal(toVertexAiModelId("gemini-4-carbon-low"), "gemini-4-carbon");
+assert.equal(toVertexAiModelId("gemini-4-carbon"), "gemini-4-carbon");
+assert.equal(toVertexAiModelId("gemini4carbon"), "gemini-4-carbon");
+assert.equal(toVertexAiModelId("gemini-4-argon-high"), "gemini-4-argon");
+assert.equal(toVertexAiModelId("gemini-3.8-flash-medium"), "gemini-3.8-flash");
+assert.equal(toVertexAiModelId("gemini-pro-agent"), "gemini-3.1-pro");
+
+assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-low", "low"), "LOW");
+assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-medium", "medium"), "MEDIUM");
+assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-high", "high"), "HIGH");
+assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-high", "xhigh"), "HIGH");
+assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-high", undefined), "HIGH");
+assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-medium", undefined), "MEDIUM");
+assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-low", undefined), "LOW");
+
+const carbonModel = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-4-carbon")! as unknown as Model<Api>;
+const argonModel = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-4-argon")! as unknown as Model<Api>;
+
+for (const [effort, expectedLevel, runtime] of [
+  ["low", "LOW", "gemini-4-carbon-low"],
+  ["medium", "MEDIUM", "gemini-4-carbon-medium"],
+  ["high", "HIGH", "gemini-4-carbon-high"],
+] as const) {
+  const ccpaCarbon = buildRequest(carbonModel, dummyToolsContext, "ent-proj", { reasoning: effort }, runtime);
+  const vertexPayload = buildVertexAiRequest(ccpaCarbon, runtime, effort);
+  assert.equal("sessionId" in vertexPayload, false, "Vertex AI rejects CCPA sessionId");
+  assert.equal("labels" in vertexPayload, false, "Vertex AI rejects CCPA labels");
+  assert.equal("entitlement" in vertexPayload, false, "Vertex AI rejects BusinessAICode entitlement");
+  assert.equal("model" in vertexPayload, false, "Vertex AI puts model in URL path");
+  assert.deepEqual(vertexPayload.generationConfig, {
+    maxOutputTokens: 65536,
+    thinkingConfig: { includeThoughts: true, thinkingLevel: expectedLevel },
+  });
+}
+
+clearEnterpriseRoutingCache();
+assert.equal(prefersVertexAiEnterprise("gemini-4-carbon-high", "ent-proj", "high"), true);
+assert.equal(prefersVertexAiEnterprise("gemini-4-argon-high", "ent-proj", "high"), false);
+
+// Live streamAntigravity Enterprise tests using mocked fetch (no network)
+const savedFetch = globalThis.fetch;
+const savedNoPrewarm = process.env.ANTIGRAVITY_NO_PREWARM;
+const savedKeepalive = process.env.ANTIGRAVITY_NO_KEEPALIVE;
+process.env.ANTIGRAVITY_NO_PREWARM = "1";
+process.env.ANTIGRAVITY_NO_KEEPALIVE = "1";
+
+function mockSseOk(text: string): Response {
+  const payload =
+    `data: ${JSON.stringify({
+      candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
+    })}\n` + "data: [DONE]\n";
+  return new Response(payload, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+try {
+  // (a) Enterprise gemini-4-carbon routes directly to Vertex AI with X-Goog-User-Project and thinkingLevel
+  const seenCalls: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const headers = new Headers(init?.headers);
+    const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    seenCalls.push({ url, headers, body });
+    return mockSseOk("CARBON_OK");
+  };
+
+  const entApiKey = JSON.stringify({
+    token: "fake-ent-token",
+    projectId: "gemini-enterprise-501902",
+    authMode: "enterprise",
+    userTier: "gcp-ge-standard-tier",
+    location: "global",
+  });
+
+  const carbonStream = streamAntigravity(carbonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "high",
+  });
+  for await (const _ of carbonStream) {
+    // consume stream until stream.end()
+  }
+  const carbonFinal = await carbonStream.result();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(carbonFinal.stopReason, "stop");
+  assert.equal(seenCalls.length, 1, "Enterprise Carbon must hit Vertex AI directly without 403 detour");
+  assert.equal(
+    seenCalls[0]?.url,
+    "https://aiplatform.googleapis.com/v1/projects/gemini-enterprise-501902/locations/global/publishers/google/models/gemini-4-carbon:streamGenerateContent?alt=sse",
+  );
+  assert.equal(seenCalls[0]?.headers.get("X-Goog-User-Project"), "gemini-enterprise-501902");
+  assert.deepEqual((seenCalls[0]?.body.generationConfig as Record<string, unknown>)?.thinkingConfig, {
+    includeThoughts: true,
+    thinkingLevel: "HIGH",
+  });
+  assert.equal(getLastDiagnostics().endpoint, VERTEX_AI_ENDPOINT);
+  assert.equal(getLastDiagnostics().resolvedRuntimeModel, "gemini-4-carbon");
+
+  // (b) Enterprise gemini-4-argon tries BusinessAICode first; on 403 policy denial, falls back to Vertex AI and caches
+  clearEnterpriseRoutingCache();
+  const argonCalls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    argonCalls.push(url);
+    if (url.startsWith(BUSINESS_AICODE_ENDPOINT)) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 403,
+            message: "Requested model is not allowed by your administrator.",
+            status: "PERMISSION_DENIED",
+          },
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return mockSseOk("ARGON_VERTEX_FALLBACK_OK");
+  };
+
+  const argonStream1 = streamAntigravity(argonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "medium",
+  });
+  const argonFinal1 = await argonStream1.result();
+  assert.equal(argonFinal1.stopReason, "stop");
+  assert.equal(argonCalls.length, 2, "Argon tries BusinessAICode then falls back to Vertex AI on 403");
+  assert.ok(argonCalls[0]?.startsWith(BUSINESS_AICODE_ENDPOINT));
+  assert.ok(argonCalls[1]?.startsWith(VERTEX_AI_ENDPOINT));
+
+  // Second turn on the same disallowed model skips BusinessAICode using the cached preference
+  const argonStream2 = streamAntigravity(argonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "medium",
+  });
+  const argonFinal2 = await argonStream2.result();
+  assert.equal(argonFinal2.stopReason, "stop");
+  assert.equal(argonCalls.length, 3, "Cached Vertex preference skips BusinessAICode 403 on next turn");
+  assert.ok(argonCalls[2]?.startsWith(VERTEX_AI_ENDPOINT));
+  clearEnterpriseRoutingCache();
+
+  // (c) Enterprise gemini-4-carbon falls back to BusinessAICode if Vertex AI API returns 403 on that project
+  const reverseCalls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    reverseCalls.push(url);
+    if (url.startsWith(VERTEX_AI_ENDPOINT)) {
+      return new Response(
+        JSON.stringify({ error: { code: 403, message: "Vertex AI API has not been used in project" } }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return mockSseOk("CARBON_BAIC_FALLBACK_OK");
+  };
+  const carbonFallbackStream = streamAntigravity(carbonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "low",
+  });
+  const carbonFallbackFinal = await carbonFallbackStream.result();
+  assert.equal(carbonFallbackFinal.stopReason, "stop");
+  assert.equal(reverseCalls.length, 2);
+  assert.ok(reverseCalls[0]?.startsWith(VERTEX_AI_ENDPOINT));
+  assert.ok(reverseCalls[1]?.startsWith(BUSINESS_AICODE_ENDPOINT));
+} finally {
+  globalThis.fetch = savedFetch;
+  if (savedNoPrewarm === undefined) delete process.env.ANTIGRAVITY_NO_PREWARM;
+  else process.env.ANTIGRAVITY_NO_PREWARM = savedNoPrewarm;
+  if (savedKeepalive === undefined) delete process.env.ANTIGRAVITY_NO_KEEPALIVE;
+  else process.env.ANTIGRAVITY_NO_KEEPALIVE = savedKeepalive;
+  clearEnterpriseRoutingCache();
+  resetDiagnosticsForTests();
+}
 
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,

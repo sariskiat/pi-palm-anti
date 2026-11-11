@@ -17,11 +17,35 @@ import { registerDiscoveredModelEnums, registerModelEnum } from "../models/model
 
 export const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const BUSINESS_AICODE_ENDPOINT = "https://businessaicode.googleapis.com";
+export const VERTEX_AI_ENDPOINT = "https://aiplatform.googleapis.com";
 export const ENDPOINT_FALLBACKS = [
   DEFAULT_ENDPOINT,
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
   "https://cloudcode-pa.googleapis.com",
 ];
+
+/** Resolve validated Vertex AI base origin for global or regional locations. */
+export function vertexAiBaseUrl(location = "global"): string {
+  const explicit = antigravityEnv("VERTEX_BASE_URL")?.trim();
+  if (explicit) return assertSafeApiBaseUrl(explicit);
+  const loc = location.trim().toLowerCase() || "global";
+  if (loc === "global") return VERTEX_AI_ENDPOINT;
+  if (!/^[a-z0-9-]+$/.test(loc)) {
+    throw new Error(`Invalid Vertex AI location: ${location}`);
+  }
+  return assertSafeApiBaseUrl(`https://${loc}-aiplatform.googleapis.com`);
+}
+
+/** Build the Vertex AI publishers/google streamGenerateContent SSE URL. */
+export function vertexAiStreamUrl(
+  projectId: string,
+  vertexModel: string,
+  location = "global",
+): string {
+  const loc = location.trim().toLowerCase() || "global";
+  const base = vertexAiBaseUrl(loc);
+  return `${base}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(loc)}/publishers/google/models/${encodeURIComponent(vertexModel)}:streamGenerateContent?alt=sse`;
+}
 
 const PROJECT_CACHE_TTL_MS = 30 * 60 * 1000;
 const projectCache = new Map<string, { projectId: string | undefined; expiresAt: number }>();
@@ -106,10 +130,7 @@ export function jsonOrTextError(text: string): string {
   return text;
 }
 
-export function isEnterpriseCredentials(creds: {
-  projectId?: string;
-  authMode?: string;
-}): boolean {
+export function isEnterpriseCredentials(creds: { projectId?: string; authMode?: string }): boolean {
   const envMode = antigravityEnv("AUTH_MODE")?.trim().toLowerCase();
   if (envMode === "enterprise") return true;
   if (envMode === "subscription") return false;
@@ -150,8 +171,7 @@ export async function resolveBusinessLicense(
         }>;
       };
       const licenses = Array.isArray(data?.licenses) ? data.licenses : [];
-      const matched =
-        licenses.find((l) => l.projectId === projectId) ?? licenses[0];
+      const matched = licenses.find((l) => l.projectId === projectId) ?? licenses[0];
       if (matched && typeof matched.userTier === "string" && matched.userTier) {
         const license = {
           userTier: matched.userTier,
@@ -160,9 +180,7 @@ export async function resolveBusinessLicense(
               ? matched.location
               : fallback.location,
           tierDisplayName:
-            typeof matched.tierDisplayName === "string"
-              ? matched.tierDisplayName
-              : undefined,
+            typeof matched.tierDisplayName === "string" ? matched.tierDisplayName : undefined,
         };
         licenseCache.set(cacheKey, {
           license,
@@ -192,6 +210,33 @@ export function getBusinessAiCodeCatalogResult(): {
     data: {
       defaultAgentModelId: "gemini-4-argon-high",
       models: {
+        "gemini-4-carbon-high": {
+          displayName: "Gemini 4 Carbon (High)",
+          modelProvider: "MODEL_PROVIDER_GOOGLE",
+          supportsThinking: true,
+          supportsImages: true,
+          recommended: true,
+          maxTokens: 1048576,
+          maxOutputTokens: 65536,
+        },
+        "gemini-4-carbon-medium": {
+          displayName: "Gemini 4 Carbon (Medium)",
+          modelProvider: "MODEL_PROVIDER_GOOGLE",
+          supportsThinking: true,
+          supportsImages: true,
+          recommended: true,
+          maxTokens: 1048576,
+          maxOutputTokens: 65536,
+        },
+        "gemini-4-carbon-low": {
+          displayName: "Gemini 4 Carbon (Low)",
+          modelProvider: "MODEL_PROVIDER_GOOGLE",
+          supportsThinking: true,
+          supportsImages: true,
+          recommended: true,
+          maxTokens: 1048576,
+          maxOutputTokens: 65536,
+        },
         "gemini-4-argon-high": {
           displayName: "Gemini 4 Argon (High)",
           modelProvider: "MODEL_PROVIDER_GOOGLE",
@@ -319,6 +364,9 @@ export function getBusinessAiCodeCatalogResult(): {
           groups: [
             {
               modelIds: [
+                "gemini-4-carbon-high",
+                "gemini-4-carbon-medium",
+                "gemini-4-carbon-low",
                 "gemini-4-argon-high",
                 "gemini-4-argon-medium",
                 "gemini-4-argon-low",
@@ -453,6 +501,7 @@ export function isUsableRuntimeModelId(id: string): boolean {
     !/\s/.test(id) &&
     !/^MODEL_/i.test(id) &&
     !/^(chat_|tab_)/i.test(id) &&
+    !/-disabled$/i.test(id) &&
     !/image/i.test(id)
   );
 }
@@ -664,7 +713,7 @@ export function mergeAvailableModelsResults(
   const mergedModels: Record<string, unknown> = {};
   let defaultAgentModelId: string | undefined;
   let defaultAgentModel: string | undefined;
-  let agentModelSorts: AvailableModelsRaw["agentModelSorts"];
+  const agentModelSortsSources: Array<NonNullable<AvailableModelsRaw["agentModelSorts"]>> = [];
   let lastEndpoint = "";
   let lastStatus = 0;
 
@@ -693,7 +742,9 @@ export function mergeAvailableModelsResults(
       defaultAgentModel = data.defaultAgentModel;
     }
     if (isRecord(data) && Array.isArray(data.agentModelSorts)) {
-      agentModelSorts = data.agentModelSorts as AvailableModelsRaw["agentModelSorts"];
+      agentModelSortsSources.push(
+        data.agentModelSorts as NonNullable<AvailableModelsRaw["agentModelSorts"]>,
+      );
     }
   }
 
@@ -710,9 +761,51 @@ export function mergeAvailableModelsResults(
       models: mergedModels as AvailableModelsRaw["models"],
       defaultAgentModelId,
       defaultAgentModel,
-      agentModelSorts,
+      agentModelSorts: mergeAgentModelSorts(agentModelSortsSources),
     },
   };
+}
+
+/**
+ * Union the curated `agentModelSorts` recommendation lists from every endpoint.
+ * New models roll out on the daily/sandbox endpoints before production (e.g.
+ * Gemini 4 Carbon, #123); a last-endpoint-wins merge lets the production list
+ * hide models the other endpoints already recommend, while the merged `models`
+ * dictionary above is a union. Sorts are matched by `displayName` and groups by
+ * position; first-seen order wins so the primary endpoint keeps its ranking.
+ */
+function mergeAgentModelSorts(
+  sources: Array<NonNullable<AvailableModelsRaw["agentModelSorts"]>>,
+): AvailableModelsRaw["agentModelSorts"] {
+  if (sources.length === 0) return undefined;
+  const seen = new Set<string>();
+  const merged: Array<{ displayName?: unknown; groups: Array<{ modelIds: string[] }> }> = [];
+  for (const sorts of sources) {
+    for (const sort of sorts) {
+      if (!isRecord(sort)) continue;
+      const displayName = typeof sort.displayName === "string" ? sort.displayName : undefined;
+      let target = merged.find((entry) => entry.displayName === displayName);
+      if (!target) {
+        target = { ...(displayName !== undefined ? { displayName } : {}), groups: [] };
+        merged.push(target);
+      }
+      const groups = Array.isArray(sort.groups) ? sort.groups : [];
+      groups.forEach((group, index) => {
+        let targetGroup = target.groups[index];
+        if (!targetGroup) {
+          targetGroup = { modelIds: [] };
+          target.groups[index] = targetGroup;
+        }
+        const modelIds = isRecord(group) && Array.isArray(group.modelIds) ? group.modelIds : [];
+        for (const id of modelIds) {
+          if (typeof id !== "string" || !id || seen.has(id)) continue;
+          seen.add(id);
+          targetGroup.modelIds.push(id);
+        }
+      });
+    }
+  }
+  return merged.length > 0 ? merged : undefined;
 }
 
 /**

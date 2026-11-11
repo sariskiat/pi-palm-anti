@@ -153,7 +153,14 @@ function parseModels(data: unknown): {
   const recommendedIds = extractRecommendedModelIds(raw.agentModelSorts);
   for (const [modelId, info] of Object.entries(modelsObj)) {
     if (!info || !isRecord(info)) continue;
-    if (info.isInternal || String(modelId).startsWith("chat_")) continue;
+    if (
+      info.isInternal ||
+      info.disabled === true ||
+      String(modelId).startsWith("chat_") ||
+      /-disabled$/i.test(modelId)
+    ) {
+      continue;
+    }
     const qi = isRecord(info.quotaInfo) ? info.quotaInfo : {};
     models.push({
       modelId,

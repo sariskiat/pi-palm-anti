@@ -624,4 +624,75 @@ const mergedWithSorts = mergeAvailableModelsResults([
 ]);
 assert.deepEqual(mergedWithSorts.data.agentModelSorts, sortsPayload);
 
+// Staggered rollouts & Gemini 4 Carbon: union agentModelSorts across endpoints and ignore *-disabled placeholders
+const stagedRollout = mergeAvailableModelsResults([
+  {
+    endpoint: "https://daily-cloudcode-pa.googleapis.com",
+    status: 200,
+    data: {
+      models: {
+        "gemini-4-carbon-low": info("Gemini 4 Carbon (Low)", { maxOutputTokens: 262144 }),
+        "gemini-4-carbon-medium": info("Gemini 4 Carbon (Medium)", { maxOutputTokens: 262144 }),
+        "gemini-4-carbon-high": info("Gemini 4 Carbon (High)", { maxOutputTokens: 262144 }),
+        "gemini-4-carbon-disabled": info("Gemini 4 Carbon", { disabled: true }),
+        "gemini-4-argon-medium": info("Gemini 4 Argon (Medium)"),
+      },
+      agentModelSorts: [
+        {
+          displayName: "Recommended",
+          groups: [
+            {
+              modelIds: [
+                "gemini-4-carbon-medium",
+                "gemini-4-carbon-high",
+                "gemini-4-carbon-low",
+                "gemini-4-carbon-disabled",
+                "gemini-4-argon-medium",
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    endpoint: "https://cloudcode-pa.googleapis.com",
+    status: 200,
+    data: {
+      models: { "gemini-4-argon-medium": info("Gemini 4 Argon (Medium)") },
+      agentModelSorts: [
+        { displayName: "Recommended", groups: [{ modelIds: ["gemini-4-argon-medium"] }] },
+      ],
+    },
+  },
+]);
+assert.deepEqual(
+  stagedRollout.data.agentModelSorts?.[0]?.groups?.[0]?.modelIds,
+  [
+    "gemini-4-carbon-medium",
+    "gemini-4-carbon-high",
+    "gemini-4-carbon-low",
+    "gemini-4-carbon-disabled",
+    "gemini-4-argon-medium",
+  ],
+  "unions recommendation lists across endpoints in first-seen order",
+);
+const stagedCatalog = buildAntigravityCatalog(
+  stagedRollout.data.models,
+  fallback,
+  stagedRollout.data.agentModelSorts,
+);
+const carbonModel = stagedCatalog.models.find((model) => model.id === "gemini-4-carbon");
+assert(carbonModel, "staged-rollout gemini-4-carbon stays selectable when any endpoint recommends it");
+assert.equal(carbonModel.maxTokens, 262144, "preserves advertised 256k maxOutputTokens for Gemini 4 Carbon");
+assert.equal(
+  stagedCatalog.routing["gemini-4-carbon"]?.defaultRequestId,
+  "gemini-4-carbon-high",
+  "Gemini 4 Carbon defaults to high variant like Argon",
+);
+assert(
+  !stagedCatalog.models.some((model) => model.id.endsWith("-disabled")),
+  "disabled placeholder variants are excluded from selectable models",
+);
+
 console.log("model discovery: live metadata, routing, validation, persistence, and TTL passed");

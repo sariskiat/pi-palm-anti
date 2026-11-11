@@ -57,6 +57,7 @@ const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 export function isSelectableRuntimeModelId(id: string, info?: ModelInfoRaw): boolean {
   if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(id) || /^MODEL_/i.test(id)) return false;
   if (/^(chat_|tab_)/i.test(id)) return false;
+  if (/-disabled$/i.test(id) || info?.disabled === true) return false;
   if (/image/i.test(id) || /image/i.test(modelDisplayName(info) ?? "")) return false;
   if (info?.isInternal === true || info?.apiProvider === "API_PROVIDER_INTERNAL") return false;
   return true;
@@ -303,20 +304,20 @@ function routingFromVariants(
   variants: Partial<Record<ThinkingLevel, string>>,
   unsuffixed?: string,
 ): AntigravityRouting {
-  const isArgon = /^gemini-4-argon/i.test(publicId);
-  const defaultRequestId = isArgon
+  const isGemini4 = /^gemini-4-(?:argon|carbon)/i.test(publicId) || /^gemini-4/i.test(publicId);
+  const defaultRequestId = isGemini4
     ? (variants[ThinkingEffort.High] ??
-        variants[ThinkingEffort.Medium] ??
-        variants[ThinkingEffort.Low] ??
-        variants[ThinkingEffort.Minimal] ??
-        unsuffixed ??
-        publicId)
+      variants[ThinkingEffort.Medium] ??
+      variants[ThinkingEffort.Low] ??
+      variants[ThinkingEffort.Minimal] ??
+      unsuffixed ??
+      publicId)
     : (variants[ThinkingEffort.Low] ??
-        variants[ThinkingEffort.Minimal] ??
-        variants[ThinkingEffort.Medium] ??
-        variants[ThinkingEffort.High] ??
-        unsuffixed ??
-        publicId);
+      variants[ThinkingEffort.Minimal] ??
+      variants[ThinkingEffort.Medium] ??
+      variants[ThinkingEffort.High] ??
+      unsuffixed ??
+      publicId);
 
   const pick = (...keys: ThinkingLevel[]): string => {
     for (const key of keys) {
@@ -459,7 +460,7 @@ function comparePublicModels(a: ProviderModelConfig, b: ProviderModelConfig): nu
 
 function modelRank(id: string): [number, number] {
   const version = parseGeminiVersion(id);
-  if (/^gemini-4/i.test(id) || /argon/i.test(id)) return [-1, -version];
+  if (/^gemini-4/i.test(id) || /argon|carbon/i.test(id)) return [-1, -version];
   if (/^gemini-.*flash/i.test(id) && !/pro/i.test(id)) return [0, -version];
   if (id.startsWith("claude-opus")) return [1, 0];
   if (id.startsWith("claude-sonnet")) return [2, 0];

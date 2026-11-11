@@ -26,6 +26,8 @@ import {
   parseApiKey,
   resolveBusinessLicense,
   resolveProjectId,
+  vertexAiBaseUrl,
+  vertexAiStreamUrl,
 } from "../client/client.js";
 import {
   getCurrentAvailableModels,
@@ -56,6 +58,7 @@ import {
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
   getThinkingConfig,
+  normalizeModelAlias,
   PROVIDER_ID,
 } from "../models/models.js";
 import { extractValidationUrl, redactSecrets, safeError } from "../utils/security.js";
@@ -74,6 +77,7 @@ import {
   type GeminiRequestBody,
   type GeminiTextPart,
   type StreamChunk,
+  type VertexThinkingLevel,
 } from "../types/types.js";
 import {
   antigravityEnv,
@@ -216,8 +220,9 @@ function isValidThoughtSignature(signature?: string): boolean {
 }
 
 function geminiRequiresThoughtSignature(runtimeModel: string): boolean {
-  if (!runtimeModel.startsWith("gemini-")) return false;
-  const match = runtimeModel.match(/^gemini-(\d+)/);
+  const normalized = normalizeModelAlias(runtimeModel);
+  if (!normalized.startsWith("gemini-")) return false;
+  const match = normalized.match(/^gemini-(\d+)/);
   if (match) {
     const major = Number.parseInt(match[1], 10);
     return major >= 3;
@@ -1566,21 +1571,73 @@ export async function streamResponse(
   return hasContent;
 }
 
+const ENTERPRISE_ROUTE_CACHE_TTL_MS = 30 * 60 * 1000;
+const vertexPreferredEnterpriseModels = new Map<string, number>();
+
+export function clearEnterpriseRoutingCache(): void {
+  vertexPreferredEnterpriseModels.clear();
+}
+
+function rememberVertexPreferredEnterpriseModel(projectId: string, baicModel: string): void {
+  const now = Date.now();
+  vertexPreferredEnterpriseModels.set(
+    `${projectId}::${baicModel.toLowerCase()}`,
+    now + ENTERPRISE_ROUTE_CACHE_TTL_MS,
+  );
+  if (vertexPreferredEnterpriseModels.size > 64) {
+    for (const [key, expiresAt] of vertexPreferredEnterpriseModels) {
+      if (expiresAt <= now) vertexPreferredEnterpriseModels.delete(key);
+    }
+  }
+}
+
 export function toBusinessAiCodeModelId(runtimeModel: string, effort?: string): string {
   const lower = runtimeModel.trim().toLowerCase();
   if (lower === "gemini-pro-agent" || lower === "gemini-3.1-pro") {
     return effort === "low" || effort === "medium" ? "gemini-3.1-pro-low" : "gemini-3.1-pro-high";
   }
-  if (lower === "gemini-4-argon") {
+  if (lower === "gemini-4-argon" || lower === "gemini4argon") {
     if (effort === "low" || effort === "minimal" || effort === "off") return "gemini-4-argon-low";
     if (effort === "medium") return "gemini-4-argon-medium";
     return "gemini-4-argon-high";
+  }
+  if (lower === "gemini-4-carbon" || lower === "gemini4carbon") {
+    if (effort === "low" || effort === "minimal" || effort === "off") return "gemini-4-carbon-low";
+    if (effort === "medium") return "gemini-4-carbon-medium";
+    return "gemini-4-carbon-high";
   }
   if (lower === "gemini-3-flash-agent") return "gemini-3.6-flash-high";
   if (lower === "gemini-3.5-flash-low" || lower === "gemini-3.5-flash-extra-low") {
     return "gemini-3.6-flash-low";
   }
   return runtimeModel;
+}
+
+export function toVertexAiModelId(runtimeModel: string): string {
+  const lower = normalizeModelAlias(runtimeModel).trim().toLowerCase();
+  if (lower.startsWith("gemini-4-carbon")) return "gemini-4-carbon";
+  if (lower.startsWith("gemini-4-argon")) return "gemini-4-argon";
+  if (lower === "gemini-pro-agent") return "gemini-3.1-pro";
+  if (lower === "gemini-3-flash-agent") return "gemini-3.5-flash";
+  if (lower.startsWith("gemini-")) {
+    return lower.replace(/-(?:extra-low|low|medium|high|tiered)$/i, "");
+  }
+  return runtimeModel.trim();
+}
+
+export function resolveVertexThinkingLevel(
+  runtimeModel: string,
+  effort?: string,
+): VertexThinkingLevel {
+  if (effort === "high" || effort === "xhigh") return "HIGH";
+  if (effort === "medium") return "MEDIUM";
+  if (effort === "low" || effort === "minimal") return "LOW";
+  const lower = runtimeModel.trim().toLowerCase();
+  if (lower.endsWith("-high") || lower === "gemini-pro-agent" || lower === "gemini-3-flash-agent") {
+    return "HIGH";
+  }
+  if (lower.endsWith("-medium")) return "MEDIUM";
+  return "LOW";
 }
 
 export function buildBusinessAiCodeRequest(
@@ -1596,6 +1653,62 @@ export function buildBusinessAiCodeRequest(
       userTier,
     },
   };
+}
+
+export function buildVertexAiRequest(
+  ccpaReq: AntigravityGenerateRequest,
+  runtimeModel: string,
+  effort?: string,
+): Record<string, unknown> {
+  const {
+    sessionId: _sessionId,
+    labels: _labels,
+    generationConfig: rawGenConfig,
+    ...cleanRequest
+  } = ccpaReq.request;
+  const vertexModel = toVertexAiModelId(runtimeModel);
+  const generationConfig: Record<string, unknown> = {};
+  if (rawGenConfig?.temperature !== undefined) {
+    generationConfig.temperature = rawGenConfig.temperature;
+  }
+  if (rawGenConfig?.maxOutputTokens !== undefined) {
+    generationConfig.maxOutputTokens = rawGenConfig.maxOutputTokens;
+  }
+  // Vertex AI publishers/google Gemini 3+ / 4 models reject thinkingBudget and require thinkingLevel.
+  if (/^gemini-(?:[3-9]|\d{2,})/i.test(vertexModel)) {
+    generationConfig.thinkingConfig = {
+      includeThoughts: true,
+      thinkingLevel: resolveVertexThinkingLevel(runtimeModel, effort),
+    };
+  } else if (rawGenConfig?.thinkingConfig !== undefined) {
+    generationConfig.thinkingConfig = rawGenConfig.thinkingConfig;
+  }
+  return {
+    ...cleanRequest,
+    ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
+  };
+}
+
+export function prefersVertexAiEnterprise(
+  runtimeModel: string,
+  projectId?: string,
+  effort?: string,
+): boolean {
+  const backendOverride = antigravityEnv("ENTERPRISE_BACKEND")?.trim().toLowerCase();
+  if (backendOverride === "vertex") return true;
+  if (backendOverride === "businessaicode") return false;
+  // Antigravity CLI routes Gemini 4 Carbon directly to Vertex AI on GCP Enterprise accounts
+  // because businessaicode.googleapis.com blocks gemini-4-carbon-* on standard Enterprise tiers.
+  if (toVertexAiModelId(runtimeModel) === "gemini-4-carbon") return true;
+  if (projectId) {
+    const baicModel = toBusinessAiCodeModelId(runtimeModel, effort).toLowerCase();
+    const expiresAt = vertexPreferredEnterpriseModels.get(`${projectId}::${baicModel}`);
+    if (expiresAt !== undefined) {
+      if (expiresAt > Date.now()) return true;
+      vertexPreferredEnterpriseModels.delete(`${projectId}::${baicModel}`);
+    }
+  }
+  return false;
 }
 
 export function streamAntigravity(
@@ -1624,7 +1737,8 @@ export function streamAntigravity(
       setLastProjectId(projectId);
 
       const effort = opts.reasoning ?? "off";
-      const isKnownModel = model.id in getCurrentAntigravityRouting();
+      const normalizedModelId = normalizeModelAlias(model.id);
+      const isKnownModel = normalizedModelId in getCurrentAntigravityRouting();
       const baseRuntimeModel =
         antigravityEnv("RUNTIME_MODEL")?.trim() || getAntigravityRequestModelId(model.id, effort);
 
@@ -1650,6 +1764,135 @@ export function streamAntigravity(
       let lastText = "";
       let received = false;
       let runtimeModel = initialRuntimeModel;
+      let effectiveRuntimeModel = initialRuntimeModel;
+
+      const sendViaVertexAi = async (targetRuntimeModel: string): Promise<void> => {
+        const vertexLocation = antigravityEnv("VERTEX_LOCATION")?.trim() || "global";
+        const vertexModel = toVertexAiModelId(targetRuntimeModel);
+        const vertexEndpoint = vertexAiBaseUrl(vertexLocation);
+        const vertexUrl = vertexAiStreamUrl(projectId, vertexModel, vertexLocation);
+        effectiveRuntimeModel = vertexModel;
+        setLastResolvedRuntimeModel(vertexModel);
+        setLastEndpoint(vertexEndpoint);
+        const ccpaReq = buildRequest(model, context, projectId, opts, targetRuntimeModel);
+        const vertexBody = JSON.stringify(
+          buildVertexAiRequest(ccpaReq, targetRuntimeModel, opts.reasoning),
+        );
+        const vertexHeaders = {
+          ...requestHeaders,
+          "X-Goog-User-Project": projectId,
+        };
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) {
+            if (opts.signal?.aborted) break;
+            const delay = 500 * 2 ** (attempt - 1);
+            await new Promise((res) => setTimeout(res, delay));
+            if (opts.signal?.aborted) break;
+          }
+          response = await fetchWithHeaderDeadline(
+            vertexUrl,
+            {
+              method: "POST",
+              headers: vertexHeaders,
+              body: vertexBody,
+            },
+            opts.signal,
+            streamHeaderTimeoutMs(),
+            streamStallTimeoutMs(),
+          );
+          setLastStatus(response.status);
+          if (response.ok) break;
+          lastText = await response.text();
+          if (response.status === 429 && isAccountQuota429(lastText)) break;
+          if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
+          if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
+        }
+      };
+
+      const sendViaBusinessAiCode = async (targetRuntimeModel: string): Promise<string> => {
+        const license =
+          creds.userTier && creds.location
+            ? { userTier: creds.userTier, location: creds.location }
+            : await resolveBusinessLicense(creds.token, projectId);
+        const baicModel = toBusinessAiCodeModelId(targetRuntimeModel, effort);
+        effectiveRuntimeModel = baicModel;
+        setLastResolvedRuntimeModel(baicModel);
+        setLastEndpoint(BUSINESS_AICODE_ENDPOINT);
+        const ccpaReq = buildRequest(model, context, projectId, opts, baicModel);
+        const baicBody = JSON.stringify(
+          buildBusinessAiCodeRequest(ccpaReq, baicModel, license.userTier),
+        );
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) {
+            if (opts.signal?.aborted) break;
+            const delay = 500 * 2 ** (attempt - 1);
+            await new Promise((res) => setTimeout(res, delay));
+            if (opts.signal?.aborted) break;
+          }
+          response = await fetchWithHeaderDeadline(
+            `${BUSINESS_AICODE_ENDPOINT}/v1beta/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(license.location)}:streamGenerateContent?alt=sse`,
+            {
+              method: "POST",
+              headers: requestHeaders,
+              body: baicBody,
+            },
+            opts.signal,
+            streamHeaderTimeoutMs(),
+            streamStallTimeoutMs(),
+          );
+          setLastStatus(response.status);
+          if (response.ok) break;
+          lastText = await response.text();
+          if (response.status === 429 && isAccountQuota429(lastText)) break;
+          if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
+          if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
+        }
+        return baicModel;
+      };
+
+      const runEnterpriseGemini = async (targetRuntimeModel: string): Promise<void> => {
+        const backendOverride = antigravityEnv("ENTERPRISE_BACKEND")?.trim().toLowerCase();
+        const vertexFirst = prefersVertexAiEnterprise(targetRuntimeModel, projectId, effort);
+        if (vertexFirst) {
+          await sendViaVertexAi(targetRuntimeModel);
+          if (
+            !response?.ok &&
+            (response?.status === 403 || response?.status === 404) &&
+            backendOverride !== "vertex"
+          ) {
+            const primaryResponse = response;
+            const primaryText = lastText;
+            const primaryModel = effectiveRuntimeModel;
+            const primaryEndpoint = getCurrentEndpoint();
+            await sendViaBusinessAiCode(targetRuntimeModel);
+            // If BusinessAICode also denies the model by admin/tier policy, keep the primary
+            // Vertex AI failure details so /antigravity.doctor surfaces why Vertex failed.
+            if (
+              !response?.ok &&
+              response?.status === 403 &&
+              /not allowed by your administrator/i.test(lastText)
+            ) {
+              response = primaryResponse;
+              lastText = primaryText;
+              effectiveRuntimeModel = primaryModel;
+              setLastResolvedRuntimeModel(primaryModel);
+              setLastEndpoint(primaryEndpoint);
+              setLastStatus(primaryResponse.status);
+            }
+          }
+          return;
+        }
+
+        const baicModel = await sendViaBusinessAiCode(targetRuntimeModel);
+        if (
+          !response?.ok &&
+          (response?.status === 403 || response?.status === 404) &&
+          backendOverride !== "businessaicode"
+        ) {
+          rememberVertexPreferredEnterpriseModel(projectId, baicModel);
+          await sendViaVertexAi(targetRuntimeModel);
+        }
+      };
 
       for (let emptyAttempt = 0; emptyAttempt <= 2; emptyAttempt++) {
         if (opts.signal?.aborted) throw new Error("Request was aborted");
@@ -1660,55 +1903,22 @@ export function streamAntigravity(
 
         for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
           runtimeModel = runtimeCandidates[candIdx]!;
+          effectiveRuntimeModel = runtimeModel;
           setLastResolvedRuntimeModel(runtimeModel);
           recordStaticRouteDiagnostics(runtimeModel);
 
+          const normalizedRuntime = normalizeModelAlias(runtimeModel);
           const useEnterprise =
             isEnterpriseCredentials({ projectId, authMode: creds.authMode }) &&
-            /^gemini-/i.test(runtimeModel);
+            /^gemini-/i.test(normalizedRuntime);
 
           if (useEnterprise) {
-            const license =
-              creds.userTier && creds.location
-                ? { userTier: creds.userTier, location: creds.location }
-                : await resolveBusinessLicense(creds.token, projectId);
-            const baicModel = toBusinessAiCodeModelId(runtimeModel, effort);
-            setLastResolvedRuntimeModel(baicModel);
-            setLastEndpoint(BUSINESS_AICODE_ENDPOINT);
-            const ccpaReq = buildRequest(model, context, projectId, opts, baicModel);
-            const baicBody = JSON.stringify(
-              buildBusinessAiCodeRequest(ccpaReq, baicModel, license.userTier),
-            );
-            for (let attempt = 0; attempt < 3; attempt++) {
-              if (attempt > 0) {
-                if (opts.signal?.aborted) break;
-                const delay = 500 * 2 ** (attempt - 1);
-                await new Promise((res) => setTimeout(res, delay));
-                if (opts.signal?.aborted) break;
-              }
-              response = await fetchWithHeaderDeadline(
-                `${BUSINESS_AICODE_ENDPOINT}/v1beta/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(license.location)}:streamGenerateContent?alt=sse`,
-                {
-                  method: "POST",
-                  headers: requestHeaders,
-                  body: baicBody,
-                },
-                opts.signal,
-                streamHeaderTimeoutMs(),
-                streamStallTimeoutMs(),
-              );
-              setLastStatus(response.status);
-              if (response.ok) break;
-              lastText = await response.text();
-              if (response.status === 429 && isAccountQuota429(lastText)) break;
-              if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
-              if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
-            }
+            await runEnterpriseGemini(runtimeModel);
           } else {
             let ccpaProjectId = projectId;
             if (
               isEnterpriseCredentials({ projectId, authMode: creds.authMode }) &&
-              !/^gemini-/i.test(runtimeModel)
+              !/^gemini-/i.test(normalizedRuntime)
             ) {
               const consumerProj = await loadCodeAssist(creds.token);
               if (consumerProj) ccpaProjectId = consumerProj;
@@ -1740,35 +1950,14 @@ export function streamAntigravity(
               if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
             }
 
-            // Automatic fallback to BusinessAICode if CCPA rejected an Enterprise GCP project with #3501
+            // Automatic fallback to Enterprise (Vertex AI / BusinessAICode) if CCPA rejected an Enterprise GCP project with #3501
             if (
               !response?.ok &&
               response?.status === 403 &&
               /#3501|valid license of this product/i.test(lastText) &&
-              /^gemini-/i.test(runtimeModel)
+              /^gemini-/i.test(normalizedRuntime)
             ) {
-              const license = await resolveBusinessLicense(creds.token, projectId);
-              const baicModel = toBusinessAiCodeModelId(runtimeModel, effort);
-              setLastResolvedRuntimeModel(baicModel);
-              setLastEndpoint(BUSINESS_AICODE_ENDPOINT);
-              const ccpaReq = buildRequest(model, context, projectId, opts, baicModel);
-              const baicBody = JSON.stringify(
-                buildBusinessAiCodeRequest(ccpaReq, baicModel, license.userTier),
-              );
-              response = await fetchWithHeaderDeadline(
-                `${BUSINESS_AICODE_ENDPOINT}/v1beta/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(license.location)}:streamGenerateContent?alt=sse`,
-                {
-                  method: "POST",
-                  headers: requestHeaders,
-                  body: baicBody,
-                },
-                opts.signal,
-                streamHeaderTimeoutMs(),
-                streamStallTimeoutMs(),
-              );
-              setLastStatus(response.status);
-              if (response.ok) break;
-              lastText = await response.text();
+              await runEnterpriseGemini(runtimeModel);
             }
           }
 
@@ -1847,7 +2036,7 @@ export function streamAntigravity(
             throw new Error(friendly);
           }
           throw new Error(
-            `Antigravity API error (${publicErrorStatus(response?.status, friendly)}, ${formatRequestDiagnostics({ projectId, runtimeModel })}): ${friendly}`,
+            `Antigravity API error (${publicErrorStatus(response?.status, friendly)}, ${formatRequestDiagnostics({ projectId, runtimeModel: effectiveRuntimeModel })}): ${friendly}`,
           );
         }
 
@@ -1867,7 +2056,9 @@ export function streamAntigravity(
       }
 
       if (!received) {
-        throw new Error("Antigravity API returned an empty response (stream ended without content)");
+        throw new Error(
+          "Antigravity API returned an empty response (stream ended without content)",
+        );
       }
       setLastLatencyMs(Date.now() - startTime);
       if (output.stopReason === "error" || output.stopReason === "aborted") {

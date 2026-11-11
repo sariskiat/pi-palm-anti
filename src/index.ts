@@ -335,11 +335,7 @@ export default function (pi: ExtensionAPI): void {
         "auth.json",
       );
       if (!existsSync(authPath)) {
-        emitCommandOutput(
-          ctx,
-          "No Pi auth.json found. Run /login antigravity first.",
-          "warning",
-        );
+        emitCommandOutput(ctx, "No Pi auth.json found. Run /login antigravity first.", "warning");
         return;
       }
       try {
