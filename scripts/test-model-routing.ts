@@ -34,6 +34,7 @@ import {
   convertMessages,
   convertTools,
   friendlyAntigravityError,
+  isRetryableRateLimit,
   mapStopReason,
   prefersVertexAiEnterprise,
   publicErrorStatus,
@@ -863,6 +864,67 @@ for (const [status, body] of [
 assert.equal(publicErrorStatus(429, unavailable429Error), "request-failed");
 assert.equal(publicErrorStatus(429, quotaResetError), "request-failed");
 assert.equal(publicErrorStatus(429, plainThrottleError), "429");
+
+// Vertex AI / Gemini Enterprise per-minute (TPM/RPM) and Standard PayGo capacity 429s must be retryable
+const tpmQuotaExhaustedRaw = JSON.stringify({
+  error: {
+    code: 429,
+    message:
+      "TPM quota exhausted. No spare capacity is currently available to serve over-limit requests. Please try again later, reduce your request rate or contact the sales team to discuss limit increase options. Details: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/standard-paygo.",
+    status: "RESOURCE_EXHAUSTED",
+  },
+});
+assert.equal(isRetryableRateLimit(tpmQuotaExhaustedRaw), true);
+const tpmQuotaError = friendlyAntigravityError(429, tpmQuotaExhaustedRaw);
+assert.match(tpmQuotaError, /Rate limited by Antigravity \(429 ResourceExhausted: TPM quota exhausted\)/);
+assert.ok(!/unavailable right now/i.test(tpmQuotaError));
+assert.ok(!/Quota reached/i.test(tpmQuotaError));
+assert.equal(publicErrorStatus(429, tpmQuotaError), "429");
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: `Antigravity API error (429, endpoint=https://aiplatform.googleapis.com): ${tpmQuotaError}`,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "Vertex AI TPM quota exhausted must be retryable by Pi",
+);
+
+const rpmQuotaExhaustedRaw = JSON.stringify({
+  error: {
+    code: 429,
+    message:
+      "Quota exceeded for aiplatform.googleapis.com/generate_content_requests_per_minute_per_project_per_base_model.",
+    status: "RESOURCE_EXHAUSTED",
+  },
+});
+assert.equal(isRetryableRateLimit(rpmQuotaExhaustedRaw), true);
+const rpmQuotaError = friendlyAntigravityError(429, rpmQuotaExhaustedRaw);
+assert.match(rpmQuotaError, /Rate limited by Antigravity \(429 ResourceExhausted: RPM quota exhausted\)/);
+assert.equal(publicErrorStatus(429, rpmQuotaError), "429");
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: rpmQuotaError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "Vertex AI requests_per_minute 429 must be retryable by Pi",
+);
+
+const dsqTryLaterRaw = JSON.stringify({
+  error: {
+    code: 429,
+    message:
+      "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429",
+    status: "RESOURCE_EXHAUSTED",
+  },
+});
+assert.equal(isRetryableRateLimit(dsqTryLaterRaw), true);
+const dsqTryLaterError = friendlyAntigravityError(429, dsqTryLaterRaw);
+assert.match(dsqTryLaterError, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
+assert.equal(publicErrorStatus(429, dsqTryLaterError), "429");
+assert.equal(isRetryableRateLimit("Resource has been exhausted (e.g. check quota)."), false);
 
 // Enterprise credential mode relies on authMode or ANTIGRAVITY_AUTH_MODE, not hardcoded project IDs
 assert.equal(isEnterpriseCredentials({ projectId: "any-gcp-project", authMode: "enterprise" }), true);
@@ -2307,6 +2369,88 @@ try {
   assert.equal(hydrogenCalls.length, 1);
   assert.ok(hydrogenCalls[0]?.url.startsWith(BUSINESS_AICODE_ENDPOINT));
   assert.equal(hydrogenCalls[0]?.body.model, "gemini-4-hydrogen-medium");
+
+  // (e) Enterprise gemini-4-carbon retries Vertex AI 429 TPM quota exhausted and recovers
+  let tpmRetryCalls = 0;
+  globalThis.fetch = async () => {
+    tpmRetryCalls++;
+    if (tpmRetryCalls === 1) {
+      return new Response(tpmQuotaExhaustedRaw, {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return mockSseOk("CARBON_RETRY_OK");
+  };
+  const carbonTpmRetryStream = streamAntigravity(carbonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "high",
+  });
+  const carbonTpmRetryFinal = await carbonTpmRetryStream.result();
+  assert.equal(carbonTpmRetryFinal.stopReason, "stop");
+  assert.equal(tpmRetryCalls, 2, "Vertex AI 429 TPM quota exhausted must retry inline and recover");
+
+  // (f) Persistent Vertex AI 429 TPM quota exhausted surfaces retryable 429 status to Pi
+  let tpmExhaustedCalls = 0;
+  globalThis.fetch = async () => {
+    tpmExhaustedCalls++;
+    return new Response(tpmQuotaExhaustedRaw, {
+      status: 429,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const carbonTpmFailStream = streamAntigravity(carbonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "high",
+  });
+  const carbonTpmFailFinal = await carbonTpmFailStream.result();
+  assert.equal(carbonTpmFailFinal.stopReason, "error");
+  assert.equal(tpmExhaustedCalls, 3, "Vertex AI 429 TPM quota exhausted retries 3 attempts before bubbling up");
+  assert.match(carbonTpmFailFinal.errorMessage ?? "", /\(429, /);
+  assert.match(carbonTpmFailFinal.errorMessage ?? "", /TPM quota exhausted/);
+  assert.equal(isRetryableAssistantError(carbonTpmFailFinal), true);
+
+  // (g) Generic Vertex AI 429 dead-model RESOURCE_EXHAUSTED does not waste retries
+  let deadModelCalls = 0;
+  globalThis.fetch = async () => {
+    deadModelCalls++;
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: 429,
+          message: "Resource has been exhausted (e.g. check quota).",
+          status: "RESOURCE_EXHAUSTED",
+        },
+      }),
+      { status: 429, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  const deadModelStream = streamAntigravity(carbonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "high",
+  });
+  const deadModelFinal = await deadModelStream.result();
+  assert.equal(deadModelFinal.stopReason, "error");
+  assert.equal(deadModelCalls, 1, "Generic unavailable 429 must break without retrying");
+  assert.match(deadModelFinal.errorMessage ?? "", /\(request-failed, /);
+  assert.equal(isRetryableAssistantError(deadModelFinal), false);
+
+  // (h) Vertex AI transient pre-header connection reset retries inline and recovers
+  let connResetCalls = 0;
+  globalThis.fetch = async () => {
+    connResetCalls++;
+    if (connResetCalls === 1) {
+      throw new TypeError("fetch failed", { cause: new Error("read ECONNRESET") });
+    }
+    return mockSseOk("CARBON_CONNRESET_RETRY_OK");
+  };
+  const connResetStream = streamAntigravity(carbonModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "medium",
+  });
+  const connResetFinal = await connResetStream.result();
+  assert.equal(connResetFinal.stopReason, "stop");
+  assert.equal(connResetCalls, 2, "Transient ECONNRESET on Vertex AI must retry inline");
 } finally {
   globalThis.fetch = savedFetch;
   if (savedNoPrewarm === undefined) delete process.env.ANTIGRAVITY_NO_PREWARM;

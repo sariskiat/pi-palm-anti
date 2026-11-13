@@ -1047,18 +1047,72 @@ export function mapStopReason(reason: string | undefined): StopReason {
   return reason ? StopReason.Error : StopReason.Stop;
 }
 
+const MAX_INLINE_RETRY_DELAY_MS = 60_000;
+
+function parseRetryAfterMs(headers: Headers | undefined): number | undefined {
+  if (!headers) return undefined;
+  const retryAfterMs = headers.get("retry-after-ms");
+  if (retryAfterMs) {
+    const ms = Number.parseFloat(retryAfterMs);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+  const retryAfter = headers.get("retry-after");
+  if (!retryAfter) return undefined;
+  const seconds = Number.parseFloat(retryAfter);
+  if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  const targetMs = Date.parse(retryAfter);
+  if (Number.isFinite(targetMs)) {
+    const delta = targetMs - Date.now();
+    if (delta > 0) return delta;
+  }
+  return undefined;
+}
+
+async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new Error("Request was aborted");
+  if (ms <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Request was aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function isTransientTransportError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false;
+  const text = safeError(error);
+  const cause = error instanceof Error && error.cause ? ` ${safeError(error.cause)}` : "";
+  return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|UND_ERR_SOCKET|socket|other side closed|connection reset|no response headers within/i.test(
+    `${text}${cause}`,
+  );
+}
+
+/** Short throttles. Pi retries these; persistent model unavailability must not match. */
+export function isRetryableRateLimit(text: string): boolean {
+  return (
+    /rate.?limit|too many requests/i.test(text) ||
+    /\b(?:tpm|rpm)\s+quota\s+(?:exhausted|exceeded)\b/i.test(text) ||
+    /no spare capacity is currently available|over-limit requests|reduce your request rate/i.test(
+      text,
+    ) ||
+    /(?:^|[^a-z0-9])(?:requests|tokens)[ _-]per[ _-]minute(?:[^a-z0-9]|$)/i.test(text) ||
+    /\bResource exhausted\.\s+Please try again later\b/i.test(text)
+  );
+}
+
 /** Account quota walls. These must stay non-retryable and may fail over to another login. */
 function isAccountQuota429(text: string): boolean {
   return (
     /Individual quota reached/i.test(text) ||
     /Resets? in /i.test(text) ||
-    (!/rate.?limit/i.test(text) && /quota exceeded|exceeded your|daily limit/i.test(text))
+    (!isRetryableRateLimit(text) && /quota exceeded|exceeded your|daily limit/i.test(text))
   );
-}
-
-/** Short throttles. Pi retries these; persistent model unavailability must not match. */
-function isRetryableRateLimit(text: string): boolean {
-  return /rate.?limit|too many requests/i.test(text);
 }
 
 /**
@@ -1145,12 +1199,18 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     // format transient throttling so Pi's retry mechanism engages.
     const hardLimit =
       Boolean(wait) ||
-      (!/rate.?limit/i.test(msg) &&
+      (!isRetryableRateLimit(msg) &&
         /quota exceeded|exceeded your|limit reached|reached your|daily limit/i.test(msg));
     if (hardLimit) {
       return `Quota reached.${wait ? ` Please wait ${wait}.` : ""} Next: switch models or retry later.`;
     }
-    if (/rate.?limit|too many requests/i.test(msg)) {
+    if (isRetryableRateLimit(msg)) {
+      if (/\btpm\s+quota\b|(?:^|[^a-z0-9])tokens[ _-]per[ _-]minute(?:[^a-z0-9]|$)/i.test(msg)) {
+        return "Rate limited by Antigravity (429 ResourceExhausted: TPM quota exhausted). Next: retrying automatically; if it persists, reduce context size (/compact), wait a minute, or switch to a Flash model.";
+      }
+      if (/\brpm\s+quota\b|(?:^|[^a-z0-9])requests[ _-]per[ _-]minute(?:[^a-z0-9]|$)/i.test(msg)) {
+        return "Rate limited by Antigravity (429 ResourceExhausted: RPM quota exhausted). Next: retrying automatically; if it persists, slow down requests or switch models.";
+      }
       return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
     }
     // A generic RESOURCE_EXHAUSTED body, with no reset hint, is how unavailable models
@@ -1790,30 +1850,42 @@ export function streamAntigravity(
           ...requestHeaders,
           "X-Goog-User-Project": projectId,
         };
+        let nextDelayMs: number | undefined;
         for (let attempt = 0; attempt < 3; attempt++) {
           if (attempt > 0) {
-            if (opts.signal?.aborted) break;
-            const delay = 500 * 2 ** (attempt - 1);
-            await new Promise((res) => setTimeout(res, delay));
-            if (opts.signal?.aborted) break;
+            await abortableSleep(nextDelayMs ?? 500 * 2 ** (attempt - 1), opts.signal);
           }
-          response = await fetchWithHeaderDeadline(
-            vertexUrl,
-            {
-              method: "POST",
-              headers: vertexHeaders,
-              body: vertexBody,
-            },
-            opts.signal,
-            streamHeaderTimeoutMs(),
-            streamStallTimeoutMs(),
-          );
+          try {
+            response = await fetchWithHeaderDeadline(
+              vertexUrl,
+              {
+                method: "POST",
+                headers: vertexHeaders,
+                body: vertexBody,
+              },
+              opts.signal,
+              streamHeaderTimeoutMs(),
+              streamStallTimeoutMs(),
+            );
+          } catch (error) {
+            if (attempt < 2 && isTransientTransportError(error, opts.signal)) {
+              nextDelayMs = 500 * 2 ** attempt;
+              continue;
+            }
+            throw error;
+          }
           setLastStatus(response.status);
           if (response.ok) break;
           lastText = await response.text();
           if (response.status === 429 && isAccountQuota429(lastText)) break;
           if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
           if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
+          const retryAfterMs = parseRetryAfterMs(response.headers);
+          if (retryAfterMs !== undefined && retryAfterMs > MAX_INLINE_RETRY_DELAY_MS) {
+            break;
+          }
+          const backoffMs = 500 * 2 ** attempt;
+          nextDelayMs = retryAfterMs !== undefined ? Math.max(retryAfterMs, backoffMs) : backoffMs;
         }
       };
 
@@ -1830,30 +1902,42 @@ export function streamAntigravity(
         const baicBody = JSON.stringify(
           buildBusinessAiCodeRequest(ccpaReq, baicModel, license.userTier),
         );
+        let nextDelayMs: number | undefined;
         for (let attempt = 0; attempt < 3; attempt++) {
           if (attempt > 0) {
-            if (opts.signal?.aborted) break;
-            const delay = 500 * 2 ** (attempt - 1);
-            await new Promise((res) => setTimeout(res, delay));
-            if (opts.signal?.aborted) break;
+            await abortableSleep(nextDelayMs ?? 500 * 2 ** (attempt - 1), opts.signal);
           }
-          response = await fetchWithHeaderDeadline(
-            `${BUSINESS_AICODE_ENDPOINT}/v1beta/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(license.location)}:streamGenerateContent?alt=sse`,
-            {
-              method: "POST",
-              headers: requestHeaders,
-              body: baicBody,
-            },
-            opts.signal,
-            streamHeaderTimeoutMs(),
-            streamStallTimeoutMs(),
-          );
+          try {
+            response = await fetchWithHeaderDeadline(
+              `${BUSINESS_AICODE_ENDPOINT}/v1beta/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(license.location)}:streamGenerateContent?alt=sse`,
+              {
+                method: "POST",
+                headers: requestHeaders,
+                body: baicBody,
+              },
+              opts.signal,
+              streamHeaderTimeoutMs(),
+              streamStallTimeoutMs(),
+            );
+          } catch (error) {
+            if (attempt < 2 && isTransientTransportError(error, opts.signal)) {
+              nextDelayMs = 500 * 2 ** attempt;
+              continue;
+            }
+            throw error;
+          }
           setLastStatus(response.status);
           if (response.ok) break;
           lastText = await response.text();
           if (response.status === 429 && isAccountQuota429(lastText)) break;
           if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
           if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
+          const retryAfterMs = parseRetryAfterMs(response.headers);
+          if (retryAfterMs !== undefined && retryAfterMs > MAX_INLINE_RETRY_DELAY_MS) {
+            break;
+          }
+          const backoffMs = 500 * 2 ** attempt;
+          nextDelayMs = retryAfterMs !== undefined ? Math.max(retryAfterMs, backoffMs) : backoffMs;
         }
         return baicModel;
       };
@@ -1906,7 +1990,7 @@ export function streamAntigravity(
         if (opts.signal?.aborted) throw new Error("Request was aborted");
         if (emptyAttempt > 0) {
           const delay = 500 * 2 ** (emptyAttempt - 1);
-          await new Promise((res) => setTimeout(res, delay));
+          await abortableSleep(delay, opts.signal);
         }
 
         for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
