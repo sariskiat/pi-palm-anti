@@ -1,6 +1,6 @@
 {
   "name": "pi-palm-anti",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Google Cloud Gemini Enterprise and Antigravity provider for Pi Coding Agent with Gemini 4 Carbon, Hydrogen, and Argon support",
   "license": "MIT",
   "repository": {
