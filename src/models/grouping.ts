@@ -304,7 +304,8 @@ function routingFromVariants(
   variants: Partial<Record<ThinkingLevel, string>>,
   unsuffixed?: string,
 ): AntigravityRouting {
-  const isGemini4 = /^gemini-4-(?:argon|carbon)/i.test(publicId) || /^gemini-4/i.test(publicId);
+  const isGemini4 =
+    /^gemini-4-(?:argon|carbon|hydrogen)/i.test(publicId) || /^gemini-4/i.test(publicId);
   const defaultRequestId = isGemini4
     ? (variants[ThinkingEffort.High] ??
       variants[ThinkingEffort.Medium] ??
@@ -460,7 +461,7 @@ function comparePublicModels(a: ProviderModelConfig, b: ProviderModelConfig): nu
 
 function modelRank(id: string): [number, number] {
   const version = parseGeminiVersion(id);
-  if (/^gemini-4/i.test(id) || /argon|carbon/i.test(id)) return [-1, -version];
+  if (/^gemini-4/i.test(id) || /argon|carbon|hydrogen/i.test(id)) return [-1, -version];
   if (/^gemini-.*flash/i.test(id) && !/pro/i.test(id)) return [0, -version];
   if (id.startsWith("claude-opus")) return [1, 0];
   if (id.startsWith("claude-sonnet")) return [2, 0];

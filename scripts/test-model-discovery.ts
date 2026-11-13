@@ -690,9 +690,65 @@ assert.equal(
   "gemini-4-carbon-high",
   "Gemini 4 Carbon defaults to high variant like Argon",
 );
-assert(
-  !stagedCatalog.models.some((model) => model.id.endsWith("-disabled")),
-  "disabled placeholder variants are excluded from selectable models",
-);
+  assert(
+    !stagedCatalog.models.some((model) => model.id.endsWith("-disabled")),
+    "disabled placeholder variants are excluded from selectable models",
+  );
+
+  // Staggered rollouts for Gemini 4 Hydrogen: active variants become selectable, -disabled placeholders excluded.
+  const hydrogenRollout = mergeAvailableModelsResults([
+    {
+      endpoint: "https://daily-cloudcode-pa.googleapis.com",
+      status: 200,
+      data: {
+        models: {
+          "gemini-4-hydrogen-low": info("Gemini 4 Hydrogen (Low)", { maxOutputTokens: 262144 }),
+          "gemini-4-hydrogen-medium": info("Gemini 4 Hydrogen (Medium)", {
+            maxOutputTokens: 262144,
+          }),
+          "gemini-4-hydrogen-high": info("Gemini 4 Hydrogen (High)", { maxOutputTokens: 262144 }),
+          "gemini-4-hydrogen-disabled": info("Gemini 4 Hydrogen", { disabled: true }),
+          "gemini-4-argon-medium": info("Gemini 4 Argon (Medium)"),
+        },
+        agentModelSorts: [
+          {
+            displayName: "Recommended",
+            groups: [
+              {
+                modelIds: [
+                  "gemini-4-hydrogen-high",
+                  "gemini-4-hydrogen-medium",
+                  "gemini-4-hydrogen-low",
+                  "gemini-4-hydrogen-disabled",
+                  "gemini-4-argon-medium",
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ]);
+  const hydrogenCatalog = buildAntigravityCatalog(
+    hydrogenRollout.data.models,
+    fallback,
+    hydrogenRollout.data.agentModelSorts,
+  );
+  const hydrogenModel = hydrogenCatalog.models.find((model) => model.id === "gemini-4-hydrogen");
+  assert(hydrogenModel, "staged-rollout gemini-4-hydrogen stays selectable when recommended");
+  assert.equal(
+    hydrogenModel.maxTokens,
+    262144,
+    "preserves advertised 256k maxOutputTokens for Gemini 4 Hydrogen",
+  );
+  assert.equal(
+    hydrogenCatalog.routing["gemini-4-hydrogen"]?.defaultRequestId,
+    "gemini-4-hydrogen-high",
+    "Gemini 4 Hydrogen defaults to high variant like Argon and Carbon",
+  );
+  assert(
+    !hydrogenCatalog.models.some((model) => model.id.endsWith("-disabled")),
+    "hydrogen disabled placeholder variants are excluded from selectable models",
+  );
 
 console.log("model discovery: live metadata, routing, validation, persistence, and TTL passed");

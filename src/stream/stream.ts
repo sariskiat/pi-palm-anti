@@ -1606,6 +1606,13 @@ export function toBusinessAiCodeModelId(runtimeModel: string, effort?: string): 
     if (effort === "medium") return "gemini-4-carbon-medium";
     return "gemini-4-carbon-high";
   }
+  if (lower === "gemini-4-hydrogen" || lower === "gemini4hydrogen") {
+    if (effort === "low" || effort === "minimal" || effort === "off") {
+      return "gemini-4-hydrogen-low";
+    }
+    if (effort === "medium") return "gemini-4-hydrogen-medium";
+    return "gemini-4-hydrogen-high";
+  }
   if (lower === "gemini-3-flash-agent") return "gemini-3.6-flash-high";
   if (lower === "gemini-3.5-flash-low" || lower === "gemini-3.5-flash-extra-low") {
     return "gemini-3.6-flash-low";
@@ -1616,6 +1623,7 @@ export function toBusinessAiCodeModelId(runtimeModel: string, effort?: string): 
 export function toVertexAiModelId(runtimeModel: string): string {
   const lower = normalizeModelAlias(runtimeModel).trim().toLowerCase();
   if (lower.startsWith("gemini-4-carbon")) return "gemini-4-carbon";
+  if (lower.startsWith("gemini-4-hydrogen")) return "gemini-4-hydrogen";
   if (lower.startsWith("gemini-4-argon")) return "gemini-4-argon";
   if (lower === "gemini-pro-agent") return "gemini-3.1-pro";
   if (lower === "gemini-3-flash-agent") return "gemini-3.5-flash";

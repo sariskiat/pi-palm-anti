@@ -9,6 +9,7 @@ export const PROVIDER_NAME = "Antigravity";
 export function normalizeModelAlias(modelId: string): string {
   const lower = modelId.trim().toLowerCase();
   if (lower === "gemini4carbon") return "gemini-4-carbon";
+  if (lower === "gemini4hydrogen") return "gemini-4-hydrogen";
   if (lower === "gemini4argon") return "gemini-4-argon";
   return modelId;
 }
@@ -18,6 +19,7 @@ export function normalizeModelAlias(modelId: string): string {
  *
  * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
  * - Gemini 4 Carbon (Low / Medium / High)
+ * - Gemini 4 Hydrogen (Low / Medium / High)
  * - Gemini 4 Argon (Low / Medium / High)
  * - Gemini 3.8 Flash (Low / Medium / High)
  * - Gemini 3.7 Flash (Low / Medium / High)
@@ -42,6 +44,17 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
       xhigh: "gemini-4-carbon-high",
     },
     defaultRequestId: "gemini-4-carbon-high",
+  },
+  "gemini-4-hydrogen": {
+    off: "gemini-4-hydrogen-low",
+    routing: {
+      minimal: "gemini-4-hydrogen-low",
+      low: "gemini-4-hydrogen-low",
+      medium: "gemini-4-hydrogen-medium",
+      high: "gemini-4-hydrogen-high",
+      xhigh: "gemini-4-hydrogen-high",
+    },
+    defaultRequestId: "gemini-4-hydrogen-high",
   },
   "gemini-4-argon": {
     off: "gemini-4-argon-low",
@@ -154,6 +167,10 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   "gemini-4-carbon-low": 65536,
   "gemini-4-carbon-medium": 65536,
   "gemini-4-carbon-high": 65536,
+  "gemini-4-hydrogen": 65536,
+  "gemini-4-hydrogen-low": 65536,
+  "gemini-4-hydrogen-medium": 65536,
+  "gemini-4-hydrogen-high": 65536,
   "gemini-4-argon": 65536,
   "gemini-4-argon-low": 65536,
   "gemini-4-argon-medium": 65536,
@@ -260,6 +277,16 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
   {
     id: "gemini-4-carbon",
     name: "Gemini 4 Carbon (Antigravity)",
+    reasoning: true,
+    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
+    input: ["text", "image"],
+    cost: geminiProCost,
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    id: "gemini-4-hydrogen",
+    name: "Gemini 4 Hydrogen (Antigravity)",
     reasoning: true,
     thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
     input: ["text", "image"],
@@ -448,6 +475,11 @@ export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
   "gemini-4-carbon-high": "MODEL_PLACEHOLDER_M667",
   "gemini-4-carbon-medium": "MODEL_PLACEHOLDER_M668",
   "gemini-4-carbon-low": "MODEL_PLACEHOLDER_M669",
+  // Gemini 4 Hydrogen
+  "gemini-4-hydrogen": "MODEL_PLACEHOLDER_M525",
+  "gemini-4-hydrogen-high": "MODEL_PLACEHOLDER_M525",
+  "gemini-4-hydrogen-medium": "MODEL_PLACEHOLDER_M526",
+  "gemini-4-hydrogen-low": "MODEL_PLACEHOLDER_M527",
   // Gemini 4 Argon
   "gemini-4-argon": "MODEL_PLACEHOLDER_M417",
   "gemini-4-argon-high": "MODEL_PLACEHOLDER_M417",
@@ -566,10 +598,11 @@ export function getThinkingConfig(
       thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
     };
   }
-  // Gemini 4 Argon/Carbon rejects thinkingBudget 0 and any budget under 1000 (#93).
+  // Gemini 4 Argon/Carbon/Hydrogen rejects thinkingBudget 0 and any budget under 1000 (#93).
   if (
     normalized.includes("argon") ||
     normalized.includes("carbon") ||
+    normalized.includes("hydrogen") ||
     normalized.startsWith("gemini-4")
   ) {
     if (!effort || effort === "off") return undefined;

@@ -24,7 +24,7 @@ import {
 
 export const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 export const ANTIGRAVITY_PERSIST_KEY = "pi-antigravity";
-export const CATALOG_SCHEMA_VERSION = 4;
+export const CATALOG_SCHEMA_VERSION = 5;
 
 type PersistedAntigravityCatalog = {
   catalog: AntigravityCatalog;
@@ -108,7 +108,7 @@ export async function refreshAntigravityModels(
     persisted.schemaVersion === CATALOG_SCHEMA_VERSION &&
     persisted.credentialKey === credentialKey;
   const hasGemini4 = current.models.some(
-    (m) => m.id === "gemini-4-argon" || m.id === "gemini-4-carbon",
+    (m) => m.id === "gemini-4-argon" || m.id === "gemini-4-carbon" || m.id === "gemini-4-hydrogen",
   );
   const now = Date.now();
   if (

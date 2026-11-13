@@ -86,6 +86,17 @@ const routeCases: Array<[string, string | undefined, string]> = [
   ["gemini4carbon", "low", "gemini-4-carbon-low"],
   ["gemini4carbon", "medium", "gemini-4-carbon-medium"],
   ["gemini4carbon", "high", "gemini-4-carbon-high"],
+  ["gemini-4-hydrogen", undefined, "gemini-4-hydrogen-low"],
+  ["gemini-4-hydrogen", "off", "gemini-4-hydrogen-low"],
+  ["gemini-4-hydrogen", "minimal", "gemini-4-hydrogen-low"],
+  ["gemini-4-hydrogen", "low", "gemini-4-hydrogen-low"],
+  ["gemini-4-hydrogen", "medium", "gemini-4-hydrogen-medium"],
+  ["gemini-4-hydrogen", "high", "gemini-4-hydrogen-high"],
+  ["gemini-4-hydrogen", "xhigh", "gemini-4-hydrogen-high"],
+  ["gemini4hydrogen", undefined, "gemini-4-hydrogen-low"],
+  ["gemini4hydrogen", "low", "gemini-4-hydrogen-low"],
+  ["gemini4hydrogen", "medium", "gemini-4-hydrogen-medium"],
+  ["gemini4hydrogen", "high", "gemini-4-hydrogen-high"],
   ["gemini-4-argon", undefined, "gemini-4-argon-low"],
   ["gemini-4-argon", "off", "gemini-4-argon-low"],
   ["gemini-4-argon", "minimal", "gemini-4-argon-low"],
@@ -137,6 +148,7 @@ for (const [model, effort, expected] of routeCases) {
 const modelIds = new Set(ANTIGRAVITY_MODELS.map((model) => model.id));
 const expectedModels = [
   "gemini-4-carbon",
+  "gemini-4-hydrogen",
   "gemini-4-argon",
   "gemini-3.8-flash",
   "gemini-3.7-flash",
@@ -158,6 +170,7 @@ for (const expected of expectedModels) {
 
 const expectedThinkingLevels: Record<string, string[]> = {
   "gemini-4-carbon": ["low", "medium", "high"],
+  "gemini-4-hydrogen": ["low", "medium", "high"],
   "gemini-4-argon": ["low", "medium", "high"],
   "gemini-3.8-flash": ["low", "medium", "high"],
   "gemini-3.7-flash": ["low", "medium", "high"],
@@ -208,6 +221,35 @@ assert.equal(toBusinessAiCodeModelId("gemini-4-carbon", "low"), "gemini-4-carbon
 assert.equal(toBusinessAiCodeModelId("gemini-4-carbon", "medium"), "gemini-4-carbon-medium");
 assert.equal(toBusinessAiCodeModelId("gemini-4-carbon", "high"), "gemini-4-carbon-high");
 assert.equal(toBusinessAiCodeModelId("gemini4carbon", "high"), "gemini-4-carbon-high");
+
+// Gemini 4 Hydrogen static/alias checks (routing, thinking, enums, max tokens, BusinessAICode)
+assert.equal(getMaxOutputTokens("gemini-4-hydrogen", "gemini-4-hydrogen-high"), 65536);
+assert.equal(getMaxOutputTokens("gemini4hydrogen", "gemini-4-hydrogen-high"), 65536);
+assert.equal(getThinkingConfig("gemini-4-hydrogen-high", "off"), undefined);
+assert.deepEqual(getThinkingConfig("gemini-4-hydrogen-low", "low"), {
+  includeThoughts: true,
+  thinkingBudget: 1000,
+});
+assert.deepEqual(getThinkingConfig("gemini-4-hydrogen-medium", "medium"), {
+  includeThoughts: true,
+  thinkingBudget: 4000,
+});
+assert.deepEqual(getThinkingConfig("gemini-4-hydrogen-high", "high"), {
+  includeThoughts: true,
+  thinkingBudget: -1,
+});
+assert.deepEqual(getThinkingConfig("gemini4hydrogen", "high"), {
+  includeThoughts: true,
+  thinkingBudget: -1,
+});
+assert.equal(getModelEnum("gemini-4-hydrogen-high"), "MODEL_PLACEHOLDER_M525");
+assert.equal(getModelEnum("gemini-4-hydrogen-medium"), "MODEL_PLACEHOLDER_M526");
+assert.equal(getModelEnum("gemini-4-hydrogen-low"), "MODEL_PLACEHOLDER_M527");
+assert.equal(getModelEnum("gemini4hydrogen"), "MODEL_PLACEHOLDER_M525");
+assert.equal(toBusinessAiCodeModelId("gemini-4-hydrogen", "low"), "gemini-4-hydrogen-low");
+assert.equal(toBusinessAiCodeModelId("gemini-4-hydrogen", "medium"), "gemini-4-hydrogen-medium");
+assert.equal(toBusinessAiCodeModelId("gemini-4-hydrogen", "high"), "gemini-4-hydrogen-high");
+assert.equal(toBusinessAiCodeModelId("gemini4hydrogen", "high"), "gemini-4-hydrogen-high");
 
 const booleanUnionTool = {
   name: "boolean_union",
@@ -2079,6 +2121,11 @@ assert.equal(toVertexAiModelId("gemini-4-carbon-medium"), "gemini-4-carbon");
 assert.equal(toVertexAiModelId("gemini-4-carbon-low"), "gemini-4-carbon");
 assert.equal(toVertexAiModelId("gemini-4-carbon"), "gemini-4-carbon");
 assert.equal(toVertexAiModelId("gemini4carbon"), "gemini-4-carbon");
+assert.equal(toVertexAiModelId("gemini-4-hydrogen-high"), "gemini-4-hydrogen");
+assert.equal(toVertexAiModelId("gemini-4-hydrogen-medium"), "gemini-4-hydrogen");
+assert.equal(toVertexAiModelId("gemini-4-hydrogen-low"), "gemini-4-hydrogen");
+assert.equal(toVertexAiModelId("gemini-4-hydrogen"), "gemini-4-hydrogen");
+assert.equal(toVertexAiModelId("gemini4hydrogen"), "gemini-4-hydrogen");
 assert.equal(toVertexAiModelId("gemini-4-argon-high"), "gemini-4-argon");
 assert.equal(toVertexAiModelId("gemini-3.8-flash-medium"), "gemini-3.8-flash");
 assert.equal(toVertexAiModelId("gemini-pro-agent"), "gemini-3.1-pro");
@@ -2092,6 +2139,9 @@ assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-medium", undefined), "M
 assert.equal(resolveVertexThinkingLevel("gemini-4-carbon-low", undefined), "LOW");
 
 const carbonModel = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-4-carbon")! as unknown as Model<Api>;
+const hydrogenModel = ANTIGRAVITY_MODELS.find(
+  (m) => m.id === "gemini-4-hydrogen",
+)! as unknown as Model<Api>;
 const argonModel = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-4-argon")! as unknown as Model<Api>;
 
 for (const [effort, expectedLevel, runtime] of [
@@ -2113,6 +2163,7 @@ for (const [effort, expectedLevel, runtime] of [
 
 clearEnterpriseRoutingCache();
 assert.equal(prefersVertexAiEnterprise("gemini-4-carbon-high", "ent-proj", "high"), true);
+assert.equal(prefersVertexAiEnterprise("gemini-4-hydrogen-high", "ent-proj", "high"), false);
 assert.equal(prefersVertexAiEnterprise("gemini-4-argon-high", "ent-proj", "high"), false);
 
 // Live streamAntigravity Enterprise tests using mocked fetch (no network)
@@ -2237,6 +2288,25 @@ try {
   assert.equal(reverseCalls.length, 2);
   assert.ok(reverseCalls[0]?.startsWith(VERTEX_AI_ENDPOINT));
   assert.ok(reverseCalls[1]?.startsWith(BUSINESS_AICODE_ENDPOINT));
+
+  // (d) Enterprise gemini-4-hydrogen routes to BusinessAICode first with thinking variant
+  clearEnterpriseRoutingCache();
+  const hydrogenCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    hydrogenCalls.push({ url, body });
+    return mockSseOk("HYDROGEN_BAIC_OK");
+  };
+  const hydrogenStream = streamAntigravity(hydrogenModel, dummyContext, {
+    apiKey: entApiKey,
+    reasoning: "medium",
+  });
+  const hydrogenFinal = await hydrogenStream.result();
+  assert.equal(hydrogenFinal.stopReason, "stop");
+  assert.equal(hydrogenCalls.length, 1);
+  assert.ok(hydrogenCalls[0]?.url.startsWith(BUSINESS_AICODE_ENDPOINT));
+  assert.equal(hydrogenCalls[0]?.body.model, "gemini-4-hydrogen-medium");
 } finally {
   globalThis.fetch = savedFetch;
   if (savedNoPrewarm === undefined) delete process.env.ANTIGRAVITY_NO_PREWARM;
