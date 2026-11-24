@@ -1,6 +1,6 @@
 # pi-palm-anti
 
-Google Cloud Gemini Enterprise (`businessaicode.googleapis.com` / Vertex AI `aiplatform.googleapis.com`) and Antigravity (`cloudcode-pa.googleapis.com`) provider for [Pi Coding Agent](https://pi.dev), with `gemini-4-carbon`, `gemini-4-hydrogen`, and `gemini-4-argon` (`low`, `medium`, `high`) support.
+Google Cloud Gemini Enterprise (`businessaicode.googleapis.com`) and Antigravity (`cloudcode-pa.googleapis.com`) provider for [Pi Coding Agent](https://pi.dev), with `gemini-4-carbon`, `gemini-4-hydrogen`, and `gemini-4-argon` (`low`, `medium`, `high`) support.
 
 ## Install
 
@@ -52,7 +52,7 @@ Then run `/reload` in Pi.
 <!-- prettier-ignore -->
 | Model | Thinking levels | Enterprise backend | Subscription backend |
 | --- | --- | --- | --- |
-| `antigravity/gemini-4-carbon` | `low`, `medium`, `high` | `aiplatform.googleapis.com` | `cloudcode-pa.googleapis.com` |
+| `antigravity/gemini-4-carbon` | `low`, `medium`, `high` | `businessaicode.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/gemini-4-hydrogen` | `low`, `medium`, `high` | `businessaicode.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/gemini-4-argon` | `low`, `medium`, `high` | `businessaicode.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/gemini-3.8-flash` | `low`, `medium`, `high` | `businessaicode.googleapis.com` | `cloudcode-pa.googleapis.com` |
@@ -60,6 +60,10 @@ Then run `/reload` in Pi.
 | `antigravity/claude-opus-4-6` | `high` | `cloudcode-pa.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/claude-sonnet-4-6` | `high` | `cloudcode-pa.googleapis.com` | `cloudcode-pa.googleapis.com` |
 | `antigravity/gpt-oss-120b` | `medium` | `cloudcode-pa.googleapis.com` | `cloudcode-pa.googleapis.com` |
+
+In Enterprise mode, every Gemini model goes to Gemini Enterprise (`businessaicode.googleapis.com`) and uses your
+Gemini Enterprise license pool. The provider never calls Vertex AI (`aiplatform.googleapis.com`), which would bill
+the project's pay-as-you-go Vertex AI quota instead.
 
 ## Commands
 
