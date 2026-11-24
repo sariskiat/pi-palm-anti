@@ -107,13 +107,6 @@ export type ThinkingWire = {
   thinkingBudget: number;
 };
 
-export type VertexThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
-
-export type VertexThinkingWire = {
-  includeThoughts: boolean;
-  thinkingLevel: VertexThinkingLevel;
-};
-
 export type GeminiGenerationConfig = {
   temperature?: number;
   maxOutputTokens?: number;

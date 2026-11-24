@@ -26,8 +26,6 @@ import {
   parseApiKey,
   resolveBusinessLicense,
   resolveProjectId,
-  vertexAiBaseUrl,
-  vertexAiStreamUrl,
 } from "../client/client.js";
 import {
   getCurrentAvailableModels,
@@ -77,7 +75,6 @@ import {
   type GeminiRequestBody,
   type GeminiTextPart,
   type StreamChunk,
-  type VertexThinkingLevel,
 } from "../types/types.js";
 import {
   antigravityEnv,
@@ -1631,26 +1628,6 @@ export async function streamResponse(
   return hasContent;
 }
 
-const ENTERPRISE_ROUTE_CACHE_TTL_MS = 30 * 60 * 1000;
-const vertexPreferredEnterpriseModels = new Map<string, number>();
-
-export function clearEnterpriseRoutingCache(): void {
-  vertexPreferredEnterpriseModels.clear();
-}
-
-function rememberVertexPreferredEnterpriseModel(projectId: string, baicModel: string): void {
-  const now = Date.now();
-  vertexPreferredEnterpriseModels.set(
-    `${projectId}::${baicModel.toLowerCase()}`,
-    now + ENTERPRISE_ROUTE_CACHE_TTL_MS,
-  );
-  if (vertexPreferredEnterpriseModels.size > 64) {
-    for (const [key, expiresAt] of vertexPreferredEnterpriseModels) {
-      if (expiresAt <= now) vertexPreferredEnterpriseModels.delete(key);
-    }
-  }
-}
-
 export function toBusinessAiCodeModelId(runtimeModel: string, effort?: string): string {
   const lower = runtimeModel.trim().toLowerCase();
   if (lower === "gemini-pro-agent" || lower === "gemini-3.1-pro") {
@@ -1680,34 +1657,6 @@ export function toBusinessAiCodeModelId(runtimeModel: string, effort?: string): 
   return runtimeModel;
 }
 
-export function toVertexAiModelId(runtimeModel: string): string {
-  const lower = normalizeModelAlias(runtimeModel).trim().toLowerCase();
-  if (lower.startsWith("gemini-4-carbon")) return "gemini-4-carbon";
-  if (lower.startsWith("gemini-4-hydrogen")) return "gemini-4-hydrogen";
-  if (lower.startsWith("gemini-4-argon")) return "gemini-4-argon";
-  if (lower === "gemini-pro-agent") return "gemini-3.1-pro";
-  if (lower === "gemini-3-flash-agent") return "gemini-3.5-flash";
-  if (lower.startsWith("gemini-")) {
-    return lower.replace(/-(?:extra-low|low|medium|high|tiered)$/i, "");
-  }
-  return runtimeModel.trim();
-}
-
-export function resolveVertexThinkingLevel(
-  runtimeModel: string,
-  effort?: string,
-): VertexThinkingLevel {
-  if (effort === "high" || effort === "xhigh") return "HIGH";
-  if (effort === "medium") return "MEDIUM";
-  if (effort === "low" || effort === "minimal") return "LOW";
-  const lower = runtimeModel.trim().toLowerCase();
-  if (lower.endsWith("-high") || lower === "gemini-pro-agent" || lower === "gemini-3-flash-agent") {
-    return "HIGH";
-  }
-  if (lower.endsWith("-medium")) return "MEDIUM";
-  return "LOW";
-}
-
 export function buildBusinessAiCodeRequest(
   ccpaReq: AntigravityGenerateRequest,
   runtimeModel: string,
@@ -1721,62 +1670,6 @@ export function buildBusinessAiCodeRequest(
       userTier,
     },
   };
-}
-
-export function buildVertexAiRequest(
-  ccpaReq: AntigravityGenerateRequest,
-  runtimeModel: string,
-  effort?: string,
-): Record<string, unknown> {
-  const {
-    sessionId: _sessionId,
-    labels: _labels,
-    generationConfig: rawGenConfig,
-    ...cleanRequest
-  } = ccpaReq.request;
-  const vertexModel = toVertexAiModelId(runtimeModel);
-  const generationConfig: Record<string, unknown> = {};
-  if (rawGenConfig?.temperature !== undefined) {
-    generationConfig.temperature = rawGenConfig.temperature;
-  }
-  if (rawGenConfig?.maxOutputTokens !== undefined) {
-    generationConfig.maxOutputTokens = rawGenConfig.maxOutputTokens;
-  }
-  // Vertex AI publishers/google Gemini 3+ / 4 models reject thinkingBudget and require thinkingLevel.
-  if (/^gemini-(?:[3-9]|\d{2,})/i.test(vertexModel)) {
-    generationConfig.thinkingConfig = {
-      includeThoughts: true,
-      thinkingLevel: resolveVertexThinkingLevel(runtimeModel, effort),
-    };
-  } else if (rawGenConfig?.thinkingConfig !== undefined) {
-    generationConfig.thinkingConfig = rawGenConfig.thinkingConfig;
-  }
-  return {
-    ...cleanRequest,
-    ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
-  };
-}
-
-export function prefersVertexAiEnterprise(
-  runtimeModel: string,
-  projectId?: string,
-  effort?: string,
-): boolean {
-  const backendOverride = antigravityEnv("ENTERPRISE_BACKEND")?.trim().toLowerCase();
-  if (backendOverride === "vertex") return true;
-  if (backendOverride === "businessaicode") return false;
-  // Antigravity CLI routes Gemini 4 Carbon directly to Vertex AI on GCP Enterprise accounts
-  // because businessaicode.googleapis.com blocks gemini-4-carbon-* on standard Enterprise tiers.
-  if (toVertexAiModelId(runtimeModel) === "gemini-4-carbon") return true;
-  if (projectId) {
-    const baicModel = toBusinessAiCodeModelId(runtimeModel, effort).toLowerCase();
-    const expiresAt = vertexPreferredEnterpriseModels.get(`${projectId}::${baicModel}`);
-    if (expiresAt !== undefined) {
-      if (expiresAt > Date.now()) return true;
-      vertexPreferredEnterpriseModels.delete(`${projectId}::${baicModel}`);
-    }
-  }
-  return false;
 }
 
 export function streamAntigravity(
@@ -1834,62 +1727,10 @@ export function streamAntigravity(
       let runtimeModel = initialRuntimeModel;
       let effectiveRuntimeModel = initialRuntimeModel;
 
-      const sendViaVertexAi = async (targetRuntimeModel: string): Promise<void> => {
-        const vertexLocation = antigravityEnv("VERTEX_LOCATION")?.trim() || "global";
-        const vertexModel = toVertexAiModelId(targetRuntimeModel);
-        const vertexEndpoint = vertexAiBaseUrl(vertexLocation);
-        const vertexUrl = vertexAiStreamUrl(projectId, vertexModel, vertexLocation);
-        effectiveRuntimeModel = vertexModel;
-        setLastResolvedRuntimeModel(vertexModel);
-        setLastEndpoint(vertexEndpoint);
-        const ccpaReq = buildRequest(model, context, projectId, opts, targetRuntimeModel);
-        const vertexBody = JSON.stringify(
-          buildVertexAiRequest(ccpaReq, targetRuntimeModel, opts.reasoning),
-        );
-        const vertexHeaders = {
-          ...requestHeaders,
-          "X-Goog-User-Project": projectId,
-        };
-        let nextDelayMs: number | undefined;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          if (attempt > 0) {
-            await abortableSleep(nextDelayMs ?? 500 * 2 ** (attempt - 1), opts.signal);
-          }
-          try {
-            response = await fetchWithHeaderDeadline(
-              vertexUrl,
-              {
-                method: "POST",
-                headers: vertexHeaders,
-                body: vertexBody,
-              },
-              opts.signal,
-              streamHeaderTimeoutMs(),
-              streamStallTimeoutMs(),
-            );
-          } catch (error) {
-            if (attempt < 2 && isTransientTransportError(error, opts.signal)) {
-              nextDelayMs = 500 * 2 ** attempt;
-              continue;
-            }
-            throw error;
-          }
-          setLastStatus(response.status);
-          if (response.ok) break;
-          lastText = await response.text();
-          if (response.status === 429 && isAccountQuota429(lastText)) break;
-          if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
-          if (![408, 429, 500, 502, 503, 504].includes(response.status)) break;
-          const retryAfterMs = parseRetryAfterMs(response.headers);
-          if (retryAfterMs !== undefined && retryAfterMs > MAX_INLINE_RETRY_DELAY_MS) {
-            break;
-          }
-          const backoffMs = 500 * 2 ** attempt;
-          nextDelayMs = retryAfterMs !== undefined ? Math.max(retryAfterMs, backoffMs) : backoffMs;
-        }
-      };
-
-      const sendViaBusinessAiCode = async (targetRuntimeModel: string): Promise<string> => {
+      // Enterprise Gemini goes to Gemini Enterprise (BusinessAICode) only, so usage stays on the
+      // license pool. Never add a Vertex AI (aiplatform.googleapis.com) route or fallback: it bills
+      // the GCP project's pay-as-you-go Vertex AI quota instead. See CLAUDE.md.
+      const sendViaBusinessAiCode = async (targetRuntimeModel: string): Promise<void> => {
         const license =
           creds.userTier && creds.location
             ? { userTier: creds.userTier, location: creds.location }
@@ -1939,51 +1780,6 @@ export function streamAntigravity(
           const backoffMs = 500 * 2 ** attempt;
           nextDelayMs = retryAfterMs !== undefined ? Math.max(retryAfterMs, backoffMs) : backoffMs;
         }
-        return baicModel;
-      };
-
-      const runEnterpriseGemini = async (targetRuntimeModel: string): Promise<void> => {
-        const backendOverride = antigravityEnv("ENTERPRISE_BACKEND")?.trim().toLowerCase();
-        const vertexFirst = prefersVertexAiEnterprise(targetRuntimeModel, projectId, effort);
-        if (vertexFirst) {
-          await sendViaVertexAi(targetRuntimeModel);
-          if (
-            !response?.ok &&
-            (response?.status === 403 || response?.status === 404) &&
-            backendOverride !== "vertex"
-          ) {
-            const primaryResponse = response;
-            const primaryText = lastText;
-            const primaryModel = effectiveRuntimeModel;
-            const primaryEndpoint = getCurrentEndpoint();
-            await sendViaBusinessAiCode(targetRuntimeModel);
-            // If BusinessAICode also denies the model by admin/tier policy, keep the primary
-            // Vertex AI failure details so /antigravity.doctor surfaces why Vertex failed.
-            if (
-              !response?.ok &&
-              response?.status === 403 &&
-              /not allowed by your administrator/i.test(lastText)
-            ) {
-              response = primaryResponse;
-              lastText = primaryText;
-              effectiveRuntimeModel = primaryModel;
-              setLastResolvedRuntimeModel(primaryModel);
-              setLastEndpoint(primaryEndpoint);
-              setLastStatus(primaryResponse.status);
-            }
-          }
-          return;
-        }
-
-        const baicModel = await sendViaBusinessAiCode(targetRuntimeModel);
-        if (
-          !response?.ok &&
-          (response?.status === 403 || response?.status === 404) &&
-          backendOverride !== "businessaicode"
-        ) {
-          rememberVertexPreferredEnterpriseModel(projectId, baicModel);
-          await sendViaVertexAi(targetRuntimeModel);
-        }
       };
 
       for (let emptyAttempt = 0; emptyAttempt <= 2; emptyAttempt++) {
@@ -2005,7 +1801,7 @@ export function streamAntigravity(
             /^gemini-/i.test(normalizedRuntime);
 
           if (useEnterprise) {
-            await runEnterpriseGemini(runtimeModel);
+            await sendViaBusinessAiCode(runtimeModel);
           } else {
             let ccpaProjectId = projectId;
             if (
@@ -2042,14 +1838,14 @@ export function streamAntigravity(
               if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
             }
 
-            // Automatic fallback to Enterprise (Vertex AI / BusinessAICode) if CCPA rejected an Enterprise GCP project with #3501
+            // Automatic fallback to Gemini Enterprise (BusinessAICode) if CCPA rejected an Enterprise GCP project with #3501
             if (
               !response?.ok &&
               response?.status === 403 &&
               /#3501|valid license of this product/i.test(lastText) &&
               /^gemini-/i.test(normalizedRuntime)
             ) {
-              await runEnterpriseGemini(runtimeModel);
+              await sendViaBusinessAiCode(runtimeModel);
             }
           }
 

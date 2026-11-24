@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   getLastDiagnostics,
   resetDiagnosticsForTests,
@@ -37,6 +39,23 @@ assert.throws(
   () => assertSafeApiBaseUrl("https://user:pass@cloudcode-pa.googleapis.com"),
   /credentials/i,
 );
+assert.throws(() => assertSafeApiBaseUrl("https://aiplatform.googleapis.com"), /Vertex AI/);
+assert.throws(() => assertSafeApiBaseUrl("https://us-central1-aiplatform.googleapis.com"), /Vertex AI/);
+assert.throws(() => assertSafeApiBaseUrl("https://AIPlatform.googleapis.com/v1"), /Vertex AI/);
+
+// Enterprise usage must stay on the Gemini Enterprise license pool; see CLAUDE.md.
+const VERTEX_AI_CALL_PATTERNS = [
+  /https:\/\/[^"'`\s]*aiplatform\.googleapis\.com/i,
+  /publishers\/google\/models/i,
+];
+const srcDir = join(import.meta.dirname, "..", "src");
+for (const file of readdirSync(srcDir, { recursive: true, encoding: "utf8" })) {
+  if (!file.endsWith(".ts")) continue;
+  const source = readFileSync(join(srcDir, file), "utf8");
+  for (const pattern of VERTEX_AI_CALL_PATTERNS) {
+    assert.doesNotMatch(source, pattern, `src/${file} must not call Vertex AI (see CLAUDE.md)`);
+  }
+}
 
 assert.match(escapeHtml(`<script>alert("x")</script>`), /&lt;script&gt;/);
 assert.equal(escapeRegExp("a.b*c?"), String.raw`a\.b\*c\?`);

@@ -17,35 +17,11 @@ import { registerDiscoveredModelEnums, registerModelEnum } from "../models/model
 
 export const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const BUSINESS_AICODE_ENDPOINT = "https://businessaicode.googleapis.com";
-export const VERTEX_AI_ENDPOINT = "https://aiplatform.googleapis.com";
 export const ENDPOINT_FALLBACKS = [
   DEFAULT_ENDPOINT,
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
   "https://cloudcode-pa.googleapis.com",
 ];
-
-/** Resolve validated Vertex AI base origin for global or regional locations. */
-export function vertexAiBaseUrl(location = "global"): string {
-  const explicit = antigravityEnv("VERTEX_BASE_URL")?.trim();
-  if (explicit) return assertSafeApiBaseUrl(explicit);
-  const loc = location.trim().toLowerCase() || "global";
-  if (loc === "global") return VERTEX_AI_ENDPOINT;
-  if (!/^[a-z0-9-]+$/.test(loc)) {
-    throw new Error(`Invalid Vertex AI location: ${location}`);
-  }
-  return assertSafeApiBaseUrl(`https://${loc}-aiplatform.googleapis.com`);
-}
-
-/** Build the Vertex AI publishers/google streamGenerateContent SSE URL. */
-export function vertexAiStreamUrl(
-  projectId: string,
-  vertexModel: string,
-  location = "global",
-): string {
-  const loc = location.trim().toLowerCase() || "global";
-  const base = vertexAiBaseUrl(loc);
-  return `${base}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(loc)}/publishers/google/models/${encodeURIComponent(vertexModel)}:streamGenerateContent?alt=sse`;
-}
 
 const PROJECT_CACHE_TTL_MS = 30 * 60 * 1000;
 const projectCache = new Map<string, { projectId: string | undefined; expiresAt: number }>();

@@ -36,6 +36,11 @@ export function assertSafeApiBaseUrl(raw: string): string {
       `ANTIGRAVITY_BASE_URL host "${host}" is not allowed. Use a *.googleapis.com endpoint.`,
     );
   }
+  if (host === "aiplatform.googleapis.com" || host.endsWith("-aiplatform.googleapis.com")) {
+    throw new Error(
+      `ANTIGRAVITY_BASE_URL host "${host}" is Vertex AI. Vertex AI bills pay-as-you-go quota, not the Gemini Enterprise license pool, so it is not allowed.`,
+    );
+  }
   const path = url.pathname.replace(/\/+$/, "");
   return `${url.origin}${path === "/" ? "" : path}`;
 }
